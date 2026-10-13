@@ -106,22 +106,28 @@ class ThermalPerformanceManager(private val context: Context) {
     /**
      * Calculates the optimal CPU thread count considering current thermal conditions,
      * available processor cores, and user-selected performance profile.
+     * Prevents scheduling onto slow efficiency cores which causes multi-threading barrier stalls
+     * and excessive thermal dissipation on ARM big.LITTLE architectures.
      */
     fun getAdaptiveThreadCount(profile: PerformanceMode, requestedThreads: Int): Int {
         val totalCores = Runtime.getRuntime().availableProcessors()
+        // Mobile SoCs (Snapdragon, Dimensity, Tensor) typically have 3-4 performance cores.
+        // Pinning 4 threads yields maximum speed while keeping silicon temperatures cool.
+        val maxPerfThreads = if (totalCores >= 8) 4 else (totalCores - 1).coerceAtLeast(2)
+
         val baseThreads = when (profile) {
             PerformanceMode.ECO -> 2
-            PerformanceMode.BALANCED -> requestedThreads.coerceIn(2, (totalCores - 1).coerceAtLeast(2))
-            PerformanceMode.PERFORMANCE -> (totalCores - 1).coerceIn(4, 8)
+            PerformanceMode.BALANCED -> requestedThreads.coerceIn(2, maxPerfThreads)
+            PerformanceMode.PERFORMANCE -> maxPerfThreads
         }
 
-        // Adaptive throttling based on real thermal status
+        // Dynamic thermal throttling based on real Android OS thermal status
         return when (_thermalState.value) {
             DeviceThermalState.NOMINAL -> baseThreads
             DeviceThermalState.LIGHT -> baseThreads
             DeviceThermalState.MODERATE -> (baseThreads - 1).coerceAtLeast(2)
-            DeviceThermalState.SEVERE -> 2
-            DeviceThermalState.CRITICAL -> 1
+            DeviceThermalState.SEVERE -> 2 // Force drop to 2 threads to cool down SoC
+            DeviceThermalState.CRITICAL -> 1 // Emergency single-thread fallback to protect device
         }
     }
 

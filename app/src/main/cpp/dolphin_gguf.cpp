@@ -37,7 +37,7 @@ jlong native_open(JNIEnv* env, jobject, jstring path, jint context_size, jint th
     ctx_params.n_ctx = (uint32_t) std::clamp((int) context_size, 1024, 4096);
     ctx_params.n_batch = 128;
     ctx_params.n_ubatch = 128;
-    ctx_params.n_threads = std::clamp((int) threads, 1, 6);
+    ctx_params.n_threads = std::clamp((int) threads, 1, 4);
     ctx_params.n_threads_batch = ctx_params.n_threads;
     llama_context* context = llama_new_context_with_model(model, ctx_params);
     if (!context) {
@@ -132,6 +132,9 @@ jint native_generate(JNIEnv* env, jobject, jlong handle, jstring prompt, jint ma
             throw_java(env, "GGUF decoding failed");
             return -1;
         }
+
+        // Thermal mitigation: yield CPU slice so OS power/thermal governors prevent core overheating
+        std::this_thread::yield();
     }
     llama_sampler_free(sampler);
     return generated;

@@ -93,6 +93,7 @@ class LlamaCppInferenceEngine(private val context: Context) : InferenceEngine {
         // Format prompt using Dolphin / Qwen ChatML standard template
         val formattedPrompt = buildChatMlPrompt(config.systemPrompt, prompt)
 
+        var lastEmitMs = 0L
         try {
             val totalTokens = nativeEngine.generate(
                 prompt = formattedPrompt,
@@ -105,20 +106,24 @@ class LlamaCppInferenceEngine(private val context: Context) : InferenceEngine {
                     chunkCount++
                     buffer.write(bytes)
 
-                    val ttft = (currentFirstToken - startMs).coerceAtLeast(0)
-                    val decodeDurationSec = (now - currentFirstToken) / 1000.0
-                    val liveTps = if (decodeDurationSec > 0.05) chunkCount / decodeDurationSec else 0.0
+                    // Throttle String conversions & channel emissions to ~35ms to eliminate GC pressure
+                    if (now - lastEmitMs >= 35L) {
+                        lastEmitMs = now
+                        val ttft = (currentFirstToken - startMs).coerceAtLeast(0)
+                        val decodeDurationSec = (now - currentFirstToken) / 1000.0
+                        val liveTps = if (decodeDurationSec > 0.05) chunkCount / decodeDurationSec else 0.0
 
-                    val liveMetrics = BenchmarkMetrics(
-                        ttftMs = ttft,
-                        decodeTps = liveTps,
-                        decodeTokens = chunkCount,
-                        totalDurationMs = now - startMs,
-                        backend = backendLabel
-                    )
+                        val liveMetrics = BenchmarkMetrics(
+                            ttftMs = ttft,
+                            decodeTps = liveTps,
+                            decodeTokens = chunkCount,
+                            totalDurationMs = now - startMs,
+                            backend = backendLabel
+                        )
 
-                    val textPreview = buffer.toString("UTF-8")
-                    trySend(GenerationChunk(text = textPreview, isComplete = false, metrics = liveMetrics))
+                        val textPreview = buffer.toString("UTF-8")
+                        trySend(GenerationChunk(text = textPreview, isComplete = false, metrics = liveMetrics))
+                    }
                     true
                 }
             )

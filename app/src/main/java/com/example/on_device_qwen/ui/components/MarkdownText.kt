@@ -455,7 +455,7 @@ fun parseMarkdownBlocks(rawText: String): List<MarkdownBlock> {
         }
 
         // 8. Ordered list item
-        val matchOrdered = Regex("""^(\d+)\.\s+(.*)""").find(trimmed)
+        val matchOrdered = ORDERED_LIST_REGEX.find(trimmed)
         if (matchOrdered != null) {
             val num = matchOrdered.groupValues[1].toIntOrNull() ?: 1
             val content = matchOrdered.groupValues[2]
@@ -474,12 +474,15 @@ fun parseMarkdownBlocks(rawText: String): List<MarkdownBlock> {
     return blocks
 }
 
+private val ORDERED_LIST_REGEX = Regex("""^(\d+)\.\s+(.*)""")
+private val TABLE_SEPARATOR_CELL_REGEX = Regex("""^:?-+:?$""")
+
 private fun isTableSeparatorLine(line: String): Boolean {
     val trimmed = line.trim()
     if (!trimmed.contains("-") || !trimmed.contains("|")) return false
     val cells = trimmed.split("|").map { it.trim() }.filter { it.isNotEmpty() }
     if (cells.isEmpty()) return false
-    return cells.all { it.matches(Regex("""^:?-+:?$""")) }
+    return cells.all { it.matches(TABLE_SEPARATOR_CELL_REGEX) }
 }
 
 private fun parseTableRow(line: String): List<String> {

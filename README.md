@@ -1,61 +1,72 @@
-# On-Device Qwen: Offline LLM & VLM for Android 🚀
+# On-Device LLM & Qwen 2.0: Offline AI Assistant 🚀
 
-[![LiteRT-LM](https://img.shields.io/badge/LiteRT--LM-0.17.1-blue.svg)](https://github.com/google-ai-edge/litert-lm)
-[![Kotlin](https://img.shields.io/badge/Kotlin-2.0+-purple.svg)](https://kotlinlang.org)
+[![Kotlin](https://img.shields.io/badge/Kotlin-2.4+-purple.svg)](https://kotlinlang.org)
 [![Compose](https://img.shields.io/badge/Jetpack%20Compose-Material%203-brightgreen.svg)](https://developer.android.com/jetpack/compose)
+[![LiteRT-LM](https://img.shields.io/badge/LiteRT--LM-0.17.1-blue.svg)](https://github.com/google-ai-edge/litert-lm)
+[![llama.cpp](https://img.shields.io/badge/llama.cpp-GGUF-orange.svg)](https://github.com/ggml-org/llama.cpp)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-**On-Device Qwen** brings Alibaba Cloud's state-of-the-art **Qwen 2.5**, **Qwen 3**, and **Qwen2-VL** models directly to your Android device, running 100% locally and completely offline with Google's **LiteRT-LM** (LiteRT / TensorFlow Lite Language Models) runtime.
+**On-Device LLM** is a privacy-first, 100% offline AI assistant for Android powered by a unified multi-engine architecture (**LiteRT-LM + llama.cpp**). It runs **Dolphin 3.0 Qwen2.5 3B**, **Qwen 2.5**, **Qwen 3**, **Qwen2-VL** multimodal vision models, and less-restricted **Huihui Qwen3.5 Abliterated** models directly on your phone's processor.
 
-No APIs. No internet connection. Zero data leaving your phone.
+No cloud APIs. No internet connection. Zero data leaving your phone.
 
 ---
 
 ## ✨ Features
 
-- 🧠 **100% Offline & Private Inference**: Everything runs locally on your device's SoC. Your prompts, chats, and images never touch the internet.
-- 👁️ **Multimodal Vision-Language Support (VLM)**: Native support for **Qwen2-VL-2B**! Select photos directly from your device gallery to analyze images, perform OCR, and ask visual questions.
-- ⚡ **Live Hardware Benchmarking**:
-  - **TTFT (Time To First Token)** in milliseconds.
-  - **TPS (Tokens Per Second)** decode throughput streamed in real-time.
-  - **Active Backend Notation**: CPU, GPU, or NPU display.
-- 🎛️ **Runtime Backend Switching**: Dynamically choose between **CPU** (SIMD / XNNPACK), **GPU** (OpenCL), and **NPU** accelerators right from the top navigation bar.
-- 💭 **Collapsible Reasoning Drawer**: Beautiful separation of reasoning (`<think>` tags) and final answers with smooth animations.
-- 🔄 **Auto-Discovery & Dynamic Model Switching**: Simply copy `.litertlm` model weights to your device's `Download/` folder. The app detects them and lets you switch instantly from a dropdown menu.
+- 🧠 **100% Offline & Private Inference**: Everything runs on-device. Your conversations, system prompts, and photos never leave your device.
+- 🐬 **Dolphin 3.0 & Less-Restricted GGUF Models**: Native support for **Dolphin 3.0 Qwen2.5 3B** (`Q4_K_M`) and **Huihui Qwen3.5 Abliterated** (`0.8B`, `2B`, `4B`) through an optimized llama.cpp C++/JNI backend.
+- 👁️ **Multimodal Vision-Language Support (VLM)**: Native image understanding with **Qwen2-VL-2B**. Attach photos directly from your gallery to inspect images, perform OCR, and ask visual questions.
+- 💬 **ChatGPT-Inspired User Experience**:
+  - Edge-to-edge layout with adaptive dark and light themes following system preferences.
+  - Floating rounded message composer with auto-expansion, photo preview, and an instant **Stop Generation** button.
+  - Navigation drawer with date-grouped chat history ("Today", "Yesterday", "Previous 7 Days", "Older"), title editing, and search.
+  - Rich Markdown rendering with dark syntax-highlighted code blocks, horizontal scroll, and one-tap **Copy Code** action.
+  - Collapsible reasoning view for models generating `<think>...</think>` tags with pulsing animation.
+  - Message action toolbar: Copy response, Share message, and Regenerate response.
+- 🗄️ **Persistent SQLite History**: Full multi-session persistent chat storage. Saved conversations persist across model switches, app backgrounding, and device reboots.
+- 🌡️ **Adaptive Thermal & Battery Management**:
+  - Monitors real Android OS thermal status callbacks (`PowerManager.OnThermalStatusChangedListener`), thermal headroom, and battery telemetry.
+  - **Eco Mode**: Conservative CPU threads (capping at 2) for maximum battery life and minimum heating.
+  - **Balanced Mode (Default)**: Dynamic resource allocation balancing throughput and device temperature.
+  - **Performance Mode**: Unlocks sustained high-speed inference while respecting system thermal safety.
+- 📊 **Real-Time Telemetry Badge**: Live tokens-per-second (TPS), time-to-first-token (TTFT in ms), active execution backend, token count, and elapsed time.
+- 📂 **Advanced Model Management**:
+  - Import `.gguf` and `.litertlm` models directly from device storage via Android Storage Access Framework (SAF).
+  - Built-in Model Catalog featuring verified Hugging Face download links, quantization details, and recommended RAM requirements.
+  - RAM safety monitor to prevent out-of-memory crashes before loading oversized models.
 
 ---
 
-## 📸 Screenshots
+## 📦 Verified Model Catalog
 
-| Multimodal VLM (Qwen2-VL-2B) | Real-time TPS & Benchmarks | Collapsible Reasoning |
-|:---:|:---:|:---:|
-| <img src="docs/images/vlm_screen.png" width="260" alt="VLM Demo" /> | <img src="docs/images/benchmarking_demo.png" width="260" alt="Benchmarking Demo" /> | <img src="docs/images/benchmarking_demo.png" width="260" alt="Reasoning Demo" /> |
+| Model | Format | Quantization | Size | Recommended RAM | Source |
+|---|---|---|---|---|---|
+| **Dolphin 3.0 Qwen2.5 3B** | GGUF | Q4_K_M | ~1.9 GB | 3.2 GB | [HuggingFace: bartowski/Dolphin3.0-Qwen2.5-3b-GGUF](https://huggingface.co/bartowski/Dolphin3.0-Qwen2.5-3b-GGUF) |
+| **Huihui Qwen3.5 0.8B Abliterated** | GGUF | Q4_K_M | ~580 MB | 1.2 GB | [HuggingFace: huihui-ai/Qwen3.5-0.8B-Abliterated-GGUF](https://huggingface.co/huihui-ai/Qwen3.5-0.8B-Abliterated-GGUF) |
+| **Huihui Qwen3.5 2B Abliterated** | GGUF | Q4_K_M | ~1.4 GB | 2.4 GB | [HuggingFace: huihui-ai/Qwen3.5-2B-Abliterated-GGUF](https://huggingface.co/huihui-ai/Qwen3.5-2B-Abliterated-GGUF) |
+| **Huihui Qwen3.5 4B Abliterated** | GGUF | Q4_K_M | ~2.6 GB | 4.2 GB | [HuggingFace: huihui-ai/Qwen3.5-4B-Abliterated-GGUF](https://huggingface.co/huihui-ai/Qwen3.5-4B-Abliterated-GGUF) |
+| **Qwen2-VL-2B Multimodal** | LiteRT | INT4 | ~1.8 GB | 2.8 GB | [HuggingFace: litert-community/Qwen2-VL-2B](https://huggingface.co/litert-community/Qwen2-VL-2B) |
+| **Qwen 2.5 1.5B Instruct** | LiteRT | INT4 | ~1.0 GB | 1.8 GB | [HuggingFace: litert-community/Qwen2.5-1.5B-Instruct](https://huggingface.co/litert-community/Qwen2.5-1.5B-Instruct) |
 
 ---
 
-## 📦 Tested Models & Download Links
+## 📲 How to Push Models to Device
 
-Download compatible `.litertlm` models directly from Hugging Face:
-
-| Model | Modality | Size | Link |
-|---|---|---|---|
-| **Qwen2-VL-2B** | Multimodal (Vision + Text) | ~1.78 GB | [Hugging Face: litert-community/Qwen2-VL-2B](https://huggingface.co/litert-community/Qwen2-VL-2B) |
-| **Qwen 2.5-1.5B-Instruct** | Text | ~1.1 GB | [Hugging Face LiteRT Hub](https://huggingface.co/litert-community) |
-| **Qwen3-0.6B** | Text | ~450 MB | [Hugging Face: litert-community/Qwen3-0.6B](https://huggingface.co/litert-community/Qwen3-0.6B) |
-
-### How to push models to your device
-
-Connect your Android device via USB and run:
+Connect your Android phone via USB and run:
 
 ```bash
-# Push Qwen2-VL-2B
-adb push Qwen2-VL-2B.litertlm /sdcard/Download/
+# Push Dolphin 3.0 GGUF
+adb push Dolphin3.0-Qwen2.5-3b-Q4_K_M.gguf /sdcard/Download/
 
-# Or push Qwen 2.5
-adb push qwen2.5-1.5b-it-gpu-int4.litertlm /sdcard/Download/
+# Push Qwen2-VL Multimodal Vision model
+adb push Qwen2-VL-2B-Instruct.litertlm /sdcard/Download/
+
+# Push Qwen 2.5 LiteRT model
+adb push Qwen2.5-1.5B-Instruct.litertlm /sdcard/Download/
 ```
 
-Launch the app, and the model selector dropdown in the top bar will automatically list all detected models.
+Or tap **Model Management > Import Model** in the app to select any `.gguf` or `.litertlm` file directly from device storage.
 
 ---
 
@@ -63,36 +74,71 @@ Launch the app, and the model selector dropdown in the top bar will automaticall
 
 ### Prerequisites
 - Android Studio Ladybug / Meerkat or later
-- JDK 17+
-- Android SDK 35+ (targetSdk 36)
-- Physical Android device with Android 8.0+ (API 26+) and at least 8 GB RAM (12+ GB recommended for larger models)
+- JDK 17 / 21
+- Android SDK 35+ (compileSdk 37, targetSdk 36, minSdk 26)
+- Android NDK 27+ and CMake 3.22.1+
 
-### Build APK via Command Line
-
+### Build Debug APK via Command Line
 ```bash
 # Clone the repository
-git clone https://github.com/carrycooldude/On-Device-Qwen.git
-cd On-Device-Qwen
+git clone https://github.com/shreeharsh-patil/On-Device-LLM.git
+cd On-Device-LLM
+
+# Run Unit Tests
+./gradlew testDebugUnitTest
 
 # Build Debug APK
 ./gradlew assembleDebug
 
-# Install on connected device
+# Install on connected device via ADB
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
 ---
 
-## 🏛️ Architecture & Tech Stack
+## 🏛️ Architecture Overview
 
-- **UI Framework**: Modern declarative UI with **Jetpack Compose** & **Material 3**.
-- **Inference Engine**: [Google LiteRT-LM](https://github.com/google-ai-edge/litert-lm) Android SDK (`com.google.ai.edge.litertlm:litertlm-android`).
-- **Multimodal Pipeline**: Jetpack Activity Photo Picker + LiteRT-LM `Contents.of(Content.ImageFile, Content.Text)`.
-- **State Management**: Android Architecture Components with `ViewModel`, Kotlin Coroutines, and reactive `StateFlow`.
-- **Hardware Acceleration**: Declarative native library links for `libOpenCL.so` to enable direct GPU execution on Adreno and Mali chipsets.
+```text
+com.example.on_device_qwen/
+├── data/
+│   ├── db/
+│   │   └── ChatDatabaseHelper.kt        // Persistent SQLite store
+│   ├── preferences/
+│   │   └── AppPreferences.kt            // Settings persistence
+│   └── repository/
+│       └── ConversationRepository.kt    // Data access layer
+├── domain/
+│   ├── engine/
+│   │   ├── InferenceEngine.kt           // Unified inference contract
+│   │   ├── LiteRTInferenceEngine.kt     // LiteRT-LM backend (Qwen 2.5, Qwen2-VL)
+│   │   ├── LlamaCppInferenceEngine.kt   // llama.cpp GGUF backend (Dolphin, Abliterated)
+│   │   ├── InferenceEngineFactory.kt    // Dynamic backend router
+│   │   └── GgufMetadataParser.kt        // GGUF header parser & RAM estimator
+│   ├── modelmanager/
+│   │   ├── ModelCatalogItem.kt          // Verified model catalog
+│   │   └── ModelRepository.kt           // Discovery & SAF file import
+│   └── performance/
+│       ├── ThermalPerformanceManager.kt // PowerManager thermal callbacks & battery telemetry
+│       └── MemoryMonitor.kt             // ActivityManager RAM inspection
+├── inference/
+│   └── DolphinNativeEngine.kt           // JNI bridge to libdolphin_gguf.so
+├── ui/
+│   ├── components/
+│   │   ├── ChatComposer.kt              // Floating message composer with Stop action
+│   │   ├── NavigationDrawer.kt          // ChatGPT-style sidebar with date grouping
+│   │   ├── MarkdownText.kt              // Markdown renderer with syntax-highlighted code
+│   │   ├── ThinkingSection.kt           // Reasoning drawer (<think>...</think>)
+│   │   ├── BenchmarkBadge.kt            // Telemetry badge (TPS, TTFT, Backend)
+│   │   ├── ModelManagerDialog.kt        // Multi-tab model manager & catalog
+│   │   └── SettingsDialog.kt            // Grouped configuration dialog
+│   ├── theme/
+│   │   └── Theme.kt                     // Dynamic system dark/light theming
+│   └── ChatScreen.kt                    // Main host screen
+└── MainActivity.kt
+```
 
 ---
 
 ## 📄 License
 
-This project is licensed under the Apache License 2.0. See [LICENSE](LICENSE) for details.
+Licensed under the Apache License 2.0. See [LICENSE](LICENSE) for details.

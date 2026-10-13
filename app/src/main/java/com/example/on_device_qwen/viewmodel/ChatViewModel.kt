@@ -1,20 +1,29 @@
 package com.example.on_device_qwen.viewmodel
 
 import android.app.Application
-import android.os.Environment
+import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.example.on_device_qwen.model.ChatMessage
-import com.google.ai.edge.litertlm.*
+import com.example.on_device_qwen.data.preferences.AppPreferences
+import com.example.on_device_qwen.data.preferences.PerformanceMode
+import com.example.on_device_qwen.data.preferences.ThemeMode
+import com.example.on_device_qwen.data.repository.ConversationRepository
+import com.example.on_device_qwen.domain.engine.GgufMetadataParser
+import com.example.on_device_qwen.domain.engine.InferenceEngine
+import com.example.on_device_qwen.domain.engine.InferenceEngineFactory
+import com.example.on_device_qwen.domain.modelmanager.ModelRepository
+import com.example.on_device_qwen.domain.performance.DeviceThermalState
+import com.example.on_device_qwen.domain.performance.MemoryMonitor
+import com.example.on_device_qwen.domain.performance.ThermalPerformanceManager
+import com.example.on_device_qwen.model.*
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.util.UUID
 
-/**
- * Sealed class representing the various states of the LLM engine lifecycle.
- */
 sealed class EngineState {
     data object Idle : EngineState()
     data class Loading(val progress: String) : EngineState()
@@ -22,332 +31,483 @@ sealed class EngineState {
     data class Error(val message: String) : EngineState()
 }
 
-enum class BackendType(val label: String, val chipText: String) {
-    CPU("CPU (XNNPACK)", "CPU"),
-    GPU("GPU (OpenCL)", "GPU"),
-    NPU("NPU (Qualcomm HTP)", "NPU")
-}
-
-/**
- * ViewModel that manages the LiteRT-LM engine lifecycle, conversation state,
- * and chat message history.
- */
-@OptIn(ExperimentalApi::class)
 class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
-    // ── Engine state ────────────────────────────────────────────────────
+    private val repository = ConversationRepository(application)
+    private val modelRepository = ModelRepository(application)
+    private val prefs = AppPreferences(application)
+    private val engineFactory = InferenceEngineFactory(application)
+    private val thermalManager = ThermalPerformanceManager(application)
+    private val memoryMonitor = MemoryMonitor(application)
+
+    private var activeEngine: InferenceEngine? = null
+    private var generationJob: Job? = null
+
+    // ── State Flows ───────────────────────────────────────────────────────────
     private val _engineState = MutableStateFlow<EngineState>(EngineState.Idle)
     val engineState: StateFlow<EngineState> = _engineState.asStateFlow()
 
-    // ── Messages ────────────────────────────────────────────────────────
+    private val _conversations = MutableStateFlow<List<ConversationSession>>(emptyList())
+    val conversations: StateFlow<List<ConversationSession>> = _conversations.asStateFlow()
+
+    private val _activeConversation = MutableStateFlow<ConversationSession?>(null)
+    val activeConversation: StateFlow<ConversationSession?> = _activeConversation.asStateFlow()
+
     private val _messages = MutableStateFlow<List<ChatMessage>>(emptyList())
     val messages: StateFlow<List<ChatMessage>> = _messages.asStateFlow()
 
-    // ── Generating flag (blocks double-send) ────────────────────────────
     private val _isGenerating = MutableStateFlow(false)
     val isGenerating: StateFlow<Boolean> = _isGenerating.asStateFlow()
 
-    // ── Model Title ────────────────────────────────────────────────────
     private val _modelTitle = MutableStateFlow("Qwen")
     val modelTitle: StateFlow<String> = _modelTitle.asStateFlow()
 
-    // ── Available Models List ──────────────────────────────────────────
+    private val _discoveredModels = MutableStateFlow<List<ModelMetadata>>(emptyList())
+    val discoveredModels: StateFlow<List<ModelMetadata>> = _discoveredModels.asStateFlow()
+
     private val _availableModels = MutableStateFlow<List<File>>(emptyList())
     val availableModels: StateFlow<List<File>> = _availableModels.asStateFlow()
 
-    // ── Active Backend ──────────────────────────────────────────────────
-    private val _currentBackend = MutableStateFlow(BackendType.CPU)
+    private val _currentBackend = MutableStateFlow(prefs.backendType)
     val currentBackend: StateFlow<BackendType> = _currentBackend.asStateFlow()
 
-    // ── Vision Model Flag ───────────────────────────────────────────────
+    private val _performanceMode = MutableStateFlow(prefs.performanceMode)
+    val performanceMode: StateFlow<PerformanceMode> = _performanceMode.asStateFlow()
+
     private val _isVisionModel = MutableStateFlow(false)
     val isVisionModel: StateFlow<Boolean> = _isVisionModel.asStateFlow()
 
-    // ── Internals ───────────────────────────────────────────────────────
-    private var engine: Engine? = null
-    private var conversation: Conversation? = null
-    private var currentModelFile: File? = null
+    private val _searchQuery = MutableStateFlow("")
+    val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
 
-    /** Search directories where model files might be placed. */
-    private val searchDirectories: List<File>
-        get() {
-            val app = getApplication<Application>()
-            return listOfNotNull(
-                app.filesDir,
-                app.getExternalFilesDir(null),
-                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
-                File("/sdcard/Download"),
-                File("/sdcard/Android/data/${app.packageName}/files"),
-                File("/data/local/tmp")
-            )
+    private val _importProgress = MutableStateFlow<Float?>(null)
+    val importProgress: StateFlow<Float?> = _importProgress.asStateFlow()
+
+    // Telemetry & Hardware State
+    val thermalState: StateFlow<DeviceThermalState> = thermalManager.thermalState
+    val batteryTemp: StateFlow<Float> = thermalManager.batteryTempCelsius
+    val batteryPercent: StateFlow<Int> = thermalManager.batteryLevelPercent
+    val isCharging: StateFlow<Boolean> = thermalManager.isCharging
+
+    private val _availRamMb = MutableStateFlow(memoryMonitor.getMemoryStatus().availRamMb)
+    val availRamMb: StateFlow<Long> = _availRamMb.asStateFlow()
+
+    private val _totalRamMb = MutableStateFlow(memoryMonitor.getMemoryStatus().totalRamMb)
+    val totalRamMb: StateFlow<Long> = _totalRamMb.asStateFlow()
+
+    // Preferences & Config State
+    private val _temperature = MutableStateFlow(prefs.temperature)
+    val temperature: StateFlow<Float> = _temperature.asStateFlow()
+
+    private val _topP = MutableStateFlow(prefs.topP)
+    val topP: StateFlow<Float> = _topP.asStateFlow()
+
+    private val _maxTokens = MutableStateFlow(prefs.maxOutputTokens)
+    val maxTokens: StateFlow<Int> = _maxTokens.asStateFlow()
+
+    private val _systemPrompt = MutableStateFlow(prefs.systemPrompt)
+    val systemPrompt: StateFlow<String> = _systemPrompt.asStateFlow()
+
+    private val _threadCount = MutableStateFlow(prefs.threadCount)
+    val threadCount: StateFlow<Int> = _threadCount.asStateFlow()
+
+    private val _themeMode = MutableStateFlow(prefs.themeMode)
+    val themeMode: StateFlow<ThemeMode> = _themeMode.asStateFlow()
+
+    init {
+        loadConversations()
+        initializeEngine()
+    }
+
+    private fun loadConversations() {
+        viewModelScope.launch {
+            val list = repository.getAllConversations()
+            _conversations.value = list
+            if (list.isNotEmpty() && _activeConversation.value == null) {
+                selectConversation(list.first())
+            }
         }
+    }
 
     /**
-     * Locate the model file on device, initialize the LiteRT-LM engine,
-     * and create a conversation session.
+     * Initializes the LLM inference engine with the active or discovered model.
      */
     fun initializeEngine(
         explicitModelFile: File? = null,
         requestedBackend: BackendType? = null
     ) {
-        if (_engineState.value is EngineState.Loading) {
-            return // already loading
+        if (_engineState.value is EngineState.Loading) return
+
+        requestedBackend?.let {
+            _currentBackend.value = it
+            prefs.backendType = it
         }
 
-        requestedBackend?.let { _currentBackend.value = it }
-
         viewModelScope.launch {
-            _engineState.value = EngineState.Loading("Searching for model files…")
+            _engineState.value = EngineState.Loading("Discovering models on device…")
 
             try {
-                // Close existing engine and conversation if re-initializing
-                withContext(Dispatchers.IO) {
-                    try { conversation?.close() } catch (_: Exception) {}
-                    try { engine?.close() } catch (_: Exception) {}
-                    conversation = null
-                    engine = null
-                }
+                // Refresh memory stats
+                val mem = memoryMonitor.getMemoryStatus()
+                _availRamMb.value = mem.availRamMb
+                _totalRamMb.value = mem.totalRamMb
 
-                // ── Refresh available models list ────────────────────
-                val allModels = withContext(Dispatchers.IO) { scanAvailableModels() }
-                _availableModels.value = allModels
+                // Scan available models
+                val allModels = modelRepository.scanModels()
+                _discoveredModels.value = allModels
+                _availableModels.value = allModels.map { it.file }
 
-                // ── Find the model to load ───────────────────────────
-                val modelFile = withContext(Dispatchers.IO) {
-                    explicitModelFile?.let { prepareReadableFile(it) } ?: currentModelFile ?: findModelFile()
-                }
-                if (modelFile == null) {
+                val targetFile = explicitModelFile ?: prefs.activeModelPath?.let { File(it) }?.takeIf { it.exists() }
+                    ?: allModels.firstOrNull()?.file
+
+                if (targetFile == null) {
                     _engineState.value = EngineState.Error(
                         buildString {
-                            appendLine("Model file not found!")
+                            appendLine("No compatible model file found!")
                             appendLine()
-                            appendLine("Please push a .litertlm model to one of:")
-                            searchDirectories.forEach { appendLine("  • ${it.absolutePath}") }
+                            appendLine("Please push or import a .litertlm or .gguf model.")
+                            appendLine("Supported:")
+                            appendLine("  • Qwen 2.5 (0.5B, 1.5B, 3B, 7B)")
+                            appendLine("  • Qwen 3 (0.6B, 1.7B, 4B)")
+                            appendLine("  • Qwen 2-VL (Multimodal Vision)")
+                            appendLine("  • Qwen 3 Abliterated GGUF")
                             appendLine()
-                            appendLine("Quick ADB command:")
+                            appendLine("Use 'Import Model' in the Model Manager or push via ADB:")
                             appendLine("  adb push <model>.litertlm /sdcard/Download/")
-                            appendLine()
-                            appendLine("Then tap 'Retry' below.")
                         }
                     )
                     return@launch
                 }
 
-                currentModelFile = modelFile
-                _modelTitle.value = modelFile.nameWithoutExtension
+                val targetMetadata = allModels.find { it.file.absolutePath == targetFile.absolutePath }
+                    ?: GgufMetadataParser.parse(targetFile)
+                    ?: ModelMetadata(
+                        file = targetFile,
+                        name = targetFile.nameWithoutExtension,
+                        format = if (targetFile.extension.equals("gguf", true)) ModelFormat.GGUF else ModelFormat.LITERT,
+                        engineType = if (targetFile.extension.equals("gguf", true)) EngineType.LLAMA_CPP else EngineType.LITERT,
+                        fileSizeBytes = targetFile.length()
+                    )
 
-                val isVlm = modelFile.nameWithoutExtension.lowercase().contains("vl")
-                _isVisionModel.value = isVlm
+                _modelTitle.value = targetMetadata.name
+                _isVisionModel.value = targetMetadata.hasVision
+                prefs.activeModelPath = targetFile.absolutePath
 
-                // ── Create EngineConfig & initialize ────────────────
-                val backendType = _currentBackend.value
-                _engineState.value = EngineState.Loading(
-                    "Loading ${modelFile.nameWithoutExtension} (${modelFile.length() / 1_048_576} MB) on ${backendType.chipText}…\nThis may take a moment."
+                val backend = _currentBackend.value
+                val threads = thermalManager.getAdaptiveThreadCount(_performanceMode.value, _threadCount.value)
+
+                val config = GenerationConfig(
+                    temperature = _temperature.value,
+                    topP = _topP.value,
+                    maxOutputTokens = _maxTokens.value,
+                    contextLength = targetMetadata.contextLength,
+                    systemPrompt = _systemPrompt.value,
+                    threadCount = threads,
+                    backend = backend
                 )
 
-                withContext(Dispatchers.IO) {
-                    val backendObj: Backend = when (backendType) {
-                        BackendType.CPU -> Backend.CPU()
-                        BackendType.GPU -> Backend.GPU()
-                        BackendType.NPU -> Backend.NPU(
-                            getApplication<Application>().applicationInfo.nativeLibraryDir
-                        )
-                    }
+                _engineState.value = EngineState.Loading(
+                    "Loading ${targetMetadata.name} (${targetMetadata.fileSizeMb} MB) on ${backend.chipText}…\nUsing $threads threads."
+                )
 
-                    try {
-                        val config = if (isVlm) {
-                            EngineConfig(
-                                modelPath = modelFile.absolutePath,
-                                backend = backendObj,
-                                maxNumImages = 1,
-                                maxNumTokens = 4096
-                            )
-                        } else {
-                            EngineConfig(
-                                modelPath = modelFile.absolutePath,
-                                backend = backendObj
-                            )
-                        }
-                        engine = Engine(config).also { it.initialize() }
-                    } catch (backendErr: Exception) {
-                        if (backendType != BackendType.CPU) {
-                            // Fallback gracefully to CPU if GPU/NPU is unsupported by this model export
-                            _currentBackend.value = BackendType.CPU
-                            val fallbackConfig = if (isVlm) {
-                                EngineConfig(
-                                    modelPath = modelFile.absolutePath,
-                                    backend = Backend.CPU(),
-                                    maxNumImages = 1,
-                                    maxNumTokens = 4096
-                                )
-                            } else {
-                                EngineConfig(
-                                    modelPath = modelFile.absolutePath,
-                                    backend = Backend.CPU()
-                                )
-                            }
-                            engine = Engine(fallbackConfig).also { it.initialize() }
-                        } else {
-                            throw backendErr
-                        }
-                    }
-                }
+                // Select engine from factory
+                val engine = engineFactory.getEngineForModel(targetFile)
+                activeEngine = engine
 
-                // ── Create conversation ─────────────────────────────
-                _engineState.value = EngineState.Loading("Creating conversation session…")
-
-                withContext(Dispatchers.IO) {
-                    val convConfig = ConversationConfig(
-                        systemInstruction = Contents.of(SYSTEM_PROMPT)
+                val loadResult = engine.loadModel(targetFile, config)
+                if (loadResult.isSuccess) {
+                    _engineState.value = EngineState.Ready
+                } else {
+                    _engineState.value = EngineState.Error(
+                        "Failed to initialize engine:\n${loadResult.exceptionOrNull()?.localizedMessage ?: "Unknown error"}"
                     )
-                    conversation = engine!!.createConversation(convConfig)
                 }
-
-                _engineState.value = EngineState.Ready
 
             } catch (e: Exception) {
                 _engineState.value = EngineState.Error(
-                    "Failed to initialize engine:\n${e.localizedMessage ?: e.toString()}"
+                    "Engine error: ${e.localizedMessage ?: e.toString()}"
                 )
             }
         }
     }
 
-    /**
-     * Switch to a different model on the device.
-     */
-    fun switchModel(modelFile: File) {
-        _messages.value = emptyList()
-        currentModelFile = modelFile
-        initializeEngine(modelFile)
+    fun switchModel(model: ModelMetadata) {
+        if (_isGenerating.value) stopGeneration()
+        initializeEngine(explicitModelFile = model.file)
     }
 
-    /**
-     * Switch backend (CPU, GPU, NPU).
-     */
+    fun switchModel(file: File) {
+        if (_isGenerating.value) stopGeneration()
+        initializeEngine(explicitModelFile = file)
+    }
+
     fun switchBackend(backend: BackendType) {
         if (_isGenerating.value) return
-        _messages.value = emptyList()
         initializeEngine(requestedBackend = backend)
     }
 
     /**
-     * Scan directories for available Qwen .litertlm files.
-     * Excludes any Gemma or incompatible models.
+     * Send user message and stream token chunks to UI with real-time telemetry.
      */
-    private fun scanAvailableModels(): List<File> {
-        val found = mutableListOf<File>()
-        val seenNames = mutableSetOf<String>()
+    fun sendMessage(userText: String, imageUri: Uri? = null) {
+        val trimmed = userText.trim()
+        if ((trimmed.isEmpty() && imageUri == null) || _isGenerating.value) return
+        val engine = activeEngine ?: return
+        if (!engine.isLoaded) return
 
-        for (dir in searchDirectories) {
-            if (!dir.exists() || !dir.isDirectory) continue
-            val files = dir.listFiles { _, name ->
-                val lower = name.lowercase()
-                lower.contains("qwen") &&
-                !lower.contains("gemma") &&
-                !lower.contains("qwen35") &&
-                (lower.endsWith(".litertlm") || lower.endsWith(".litertl"))
-            } ?: continue
+        viewModelScope.launch {
+            // Ensure an active conversation session exists in SQLite
+            var currentSession = _activeConversation.value
+            if (currentSession == null) {
+                val newSession = ConversationSession(
+                    id = UUID.randomUUID().toString(),
+                    title = trimmed.take(30).ifEmpty { "Image Query" },
+                    modelName = _modelTitle.value
+                )
+                repository.saveConversation(newSession)
+                _activeConversation.value = newSession
+                currentSession = newSession
+                loadConversations()
+            }
 
-            for (file in files) {
-                if (file.length() > 1024 * 1024 && seenNames.add(file.nameWithoutExtension)) {
-                    found.add(file)
+            // Save local cache image for VLM if attached
+            val localImagePath = imageUri?.let { saveUriToCache(it)?.absolutePath }
+            val promptText = if (trimmed.isNotEmpty()) trimmed else "Describe this image in detail."
+
+            // Add user message to UI and database
+            val userMsg = ChatMessage(
+                conversationId = currentSession.id,
+                text = promptText,
+                imagePath = localImagePath,
+                isUser = true
+            )
+            _messages.value = _messages.value + userMsg
+            repository.saveMessage(userMsg)
+
+            // Placeholder streaming assistant message
+            val botMsgId = System.nanoTime()
+            val initialBotMsg = ChatMessage(
+                id = botMsgId,
+                conversationId = currentSession.id,
+                text = "",
+                isUser = false,
+                isStreaming = true,
+                benchmark = BenchmarkMetrics(backend = _currentBackend.value.chipText)
+            )
+            _messages.value = _messages.value + initialBotMsg
+            _isGenerating.value = true
+
+            val threads = thermalManager.getAdaptiveThreadCount(_performanceMode.value, _threadCount.value)
+            val config = GenerationConfig(
+                temperature = _temperature.value,
+                topP = _topP.value,
+                maxOutputTokens = _maxTokens.value,
+                systemPrompt = _systemPrompt.value,
+                threadCount = threads,
+                backend = _currentBackend.value
+            )
+
+            generationJob = launch {
+                try {
+                    engine.sendMessage(promptText, localImagePath, config).collect { chunk ->
+                        val parsed = parseReasoningTags(chunk.text)
+
+                        withContext(Dispatchers.Main) {
+                            _messages.value = _messages.value.map { msg ->
+                                if (msg.id == botMsgId) {
+                                    msg.copy(
+                                        text = parsed.answer,
+                                        thinkText = parsed.think,
+                                        isStreaming = !chunk.isComplete,
+                                        benchmark = chunk.metrics
+                                    )
+                                } else msg
+                            }
+                        }
+
+                        if (chunk.isComplete) {
+                            val finalMsg = _messages.value.find { it.id == botMsgId }
+                            if (finalMsg != null) {
+                                repository.saveMessage(finalMsg.copy(isStreaming = false))
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    val errorMsg = ChatMessage(
+                        id = botMsgId,
+                        conversationId = currentSession.id,
+                        text = "⚠️ Error during generation: ${e.localizedMessage ?: e.toString()}",
+                        isUser = false,
+                        isStreaming = false,
+                        isError = true
+                    )
+                    _messages.value = _messages.value.map { if (it.id == botMsgId) errorMsg else it }
+                    repository.saveMessage(errorMsg)
+                } finally {
+                    _isGenerating.value = false
+                    loadConversations()
                 }
             }
         }
-        return found
     }
 
     /**
-     * Search for any compatible .litertlm or .litertl model file across directories,
-     * prioritizing Qwen models and copying to app-private storage if needed for accessibility.
+     * Instantly halts token generation.
      */
-    private fun findModelFile(): File? {
-        val app = getApplication<Application>()
-        val internalFile = File(app.filesDir, "Qwen2.5-1.5B-Instruct.litertlm")
-        if (internalFile.exists() && internalFile.length() > 0) {
-            return internalFile
-        }
+    fun stopGeneration() {
+        if (_isGenerating.value) {
+            generationJob?.cancel()
+            activeEngine?.cancelGeneration()
+            _isGenerating.value = false
 
-        val qwen3File = File(app.filesDir, "Qwen3-0.6B.litertlm")
-        if (qwen3File.exists() && qwen3File.length() > 0) {
-            return qwen3File
-        }
-
-        val candidates = listOf(
-            "Qwen2.5-1.5B-Instruct.litertlm",
-            "Qwen3-0.6B.litertlm",
-            "Qwen3-0.6B.litertl",
-            "Qwen2.5-3B-Instruct.litertlm",
-            "qwen.litertlm"
-        )
-
-        // 1. Direct candidate matching
-        for (dir in searchDirectories) {
-            if (!dir.exists() || !dir.isDirectory) continue
-            for (candidate in candidates) {
-                val file = File(dir, candidate)
-                if (file.exists() && file.length() > 0 && file.canRead()) {
-                    return prepareReadableFile(file)
-                }
+            // Mark any streaming message as complete
+            _messages.value = _messages.value.map {
+                if (it.isStreaming) it.copy(isStreaming = false) else it
             }
         }
-
-        // 2. Scan directories for any file with qwen and .litertl
-        for (dir in searchDirectories) {
-            if (!dir.exists() || !dir.isDirectory) continue
-            val matched = dir.listFiles { _, name ->
-                val lower = name.lowercase()
-                lower.contains("qwen") &&
-                !lower.contains("gemma") &&
-                !lower.contains("qwen35") &&
-                (lower.endsWith(".litertlm") || lower.endsWith(".litertl"))
-            } ?: emptyArray()
-
-            val bestMatch = matched.firstOrNull { it.length() > 0 && it.canRead() }
-            if (bestMatch != null) {
-                return prepareReadableFile(bestMatch)
-            }
-        }
-
-        return null
     }
 
     /**
-     * Ensures the file is in an app-accessible location and has the required .litertlm extension.
+     * Regenerates the last assistant response.
      */
-    private fun prepareReadableFile(source: File): File {
-        val app = getApplication<Application>()
-        val targetName = if (source.name.endsWith(".litertlm", ignoreCase = true)) {
-            source.name
+    fun regenerateLastResponse() {
+        if (_isGenerating.value) return
+        val currentMsgs = _messages.value
+        val lastUserMsg = currentMsgs.lastOrNull { it.isUser } ?: return
+
+        // Remove the last assistant message
+        val updatedMsgs = currentMsgs.filterNot { it.id == currentMsgs.lastOrNull()?.id && !it.isUser }
+        _messages.value = updatedMsgs
+
+        sendMessage(lastUserMsg.text, lastUserMsg.imagePath?.let { Uri.fromFile(File(it)) })
+    }
+
+    /**
+     * Edit a previous user message and re-run conversation from that point.
+     */
+    fun editAndResendMessage(messageId: Long, newText: String) {
+        if (_isGenerating.value) return
+        val currentSession = _activeConversation.value ?: return
+
+        viewModelScope.launch {
+            val targetMsg = _messages.value.find { it.id == messageId } ?: return@launch
+            repository.deleteMessagesAfter(currentSession.id, targetMsg.timestamp)
+            _messages.value = repository.getMessages(currentSession.id)
+            sendMessage(newText)
+        }
+    }
+
+    // ── Conversation Lifecycle ────────────────────────────────────────────────
+    fun newChat() {
+        if (_isGenerating.value) stopGeneration()
+        _activeConversation.value = null
+        _messages.value = emptyList()
+    }
+
+    fun selectConversation(session: ConversationSession) {
+        if (_isGenerating.value) stopGeneration()
+        _activeConversation.value = session
+        viewModelScope.launch {
+            _messages.value = repository.getMessages(session.id)
+        }
+    }
+
+    fun renameConversation(session: ConversationSession, newTitle: String) {
+        viewModelScope.launch {
+            repository.updateConversationTitle(session.id, newTitle)
+            loadConversations()
+            if (_activeConversation.value?.id == session.id) {
+                _activeConversation.value = _activeConversation.value?.copy(title = newTitle)
+            }
+        }
+    }
+
+    fun deleteConversation(session: ConversationSession) {
+        viewModelScope.launch {
+            repository.deleteConversation(session.id)
+            if (_activeConversation.value?.id == session.id) {
+                newChat()
+            }
+            loadConversations()
+        }
+    }
+
+    fun togglePin(session: ConversationSession) {
+        viewModelScope.launch {
+            repository.togglePinConversation(session.id, !session.isPinned)
+            loadConversations()
+        }
+    }
+
+    fun searchConversations(query: String) {
+        _searchQuery.value = query
+        viewModelScope.launch {
+            _conversations.value = repository.searchConversations(query)
+        }
+    }
+
+    fun clearChat() {
+        val currentSession = _activeConversation.value
+        if (currentSession != null) {
+            deleteConversation(currentSession)
         } else {
-            "${source.nameWithoutExtension}.litertlm"
-        }
-
-        if (source.parentFile?.absolutePath == app.filesDir.absolutePath && source.name == targetName) {
-            return source
-        }
-        val dest = File(app.filesDir, targetName)
-        if (dest.exists() && dest.length() == source.length()) {
-            return dest
-        }
-        return try {
-            _engineState.value = EngineState.Loading("Importing model to app storage…")
-            source.inputStream().use { input ->
-                dest.outputStream().use { output ->
-                    input.copyTo(output)
-                }
-            }
-            dest
-        } catch (_: Exception) {
-            source
+            newChat()
         }
     }
 
-    /**
-     * Copies an external content URI into a local app cache file for the C++ LiteRT-LM engine.
-     */
-    private fun saveUriToCache(uri: android.net.Uri): File? {
+    // ── Model Importing ───────────────────────────────────────────────────────
+    fun importModel(uri: Uri) {
+        viewModelScope.launch {
+            _importProgress.value = 0f
+            val result = modelRepository.importModelFromUri(uri) { prog ->
+                _importProgress.value = prog
+            }
+            _importProgress.value = null
+
+            if (result.isSuccess) {
+                val file = result.getOrNull()!!
+                initializeEngine(explicitModelFile = file)
+            }
+        }
+    }
+
+    // ── Settings Updates ──────────────────────────────────────────────────────
+    fun setPerformanceMode(mode: PerformanceMode) {
+        _performanceMode.value = mode
+        prefs.performanceMode = mode
+    }
+
+    fun setThreadCount(count: Int) {
+        _threadCount.value = count
+        prefs.threadCount = count
+    }
+
+    fun setTemperature(temp: Float) {
+        _temperature.value = temp
+        prefs.temperature = temp
+    }
+
+    fun setTopP(p: Float) {
+        _topP.value = p
+        prefs.topP = p
+    }
+
+    fun setMaxTokens(tokens: Int) {
+        _maxTokens.value = tokens
+        prefs.maxOutputTokens = tokens
+    }
+
+    fun setSystemPrompt(prompt: String) {
+        _systemPrompt.value = prompt
+        prefs.systemPrompt = prompt
+    }
+
+    fun setThemeMode(mode: ThemeMode) {
+        _themeMode.value = mode
+        prefs.themeMode = mode
+    }
+
+    private fun saveUriToCache(uri: Uri): File? {
         return try {
             val app = getApplication<Application>()
             val targetFile = File(app.cacheDir, "vlm_input_${System.currentTimeMillis()}.jpg")
@@ -362,226 +522,30 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /**
-     * Send a user message and stream the model's response token-by-token.
-     * Supports multimodal image inputs for Vision-Language Models (VLM).
-     * Computes real-time and engine-level TTFT and TPS benchmarking notations.
-     */
-    fun sendMessage(userText: String, imageUri: android.net.Uri? = null) {
-        val trimmed = userText.trim()
-        if ((trimmed.isEmpty() && imageUri == null) || _isGenerating.value) return
-        if (conversation == null) return
+    private data class ParsedResponse(val think: String?, val answer: String)
 
-        val startMs = System.currentTimeMillis()
-        var firstTokenMs: Long? = null
-        var chunkCount = 0
-        val activeBackendName = _currentBackend.value.chipText
+    private fun parseReasoningTags(raw: String): ParsedResponse {
+        val openTag = "<think>"
+        val closeTag = "</think>"
+        val openIdx = raw.indexOf(openTag)
+        if (openIdx == -1) return ParsedResponse(null, raw)
 
-        val localImageFile = imageUri?.let { saveUriToCache(it) }
-        val promptText = if (trimmed.isNotEmpty()) {
-            trimmed
-        } else if (localImageFile != null) {
-            "Describe this image in detail."
+        val afterOpen = raw.substring(openIdx + openTag.length)
+        val closeIdx = afterOpen.indexOf(closeTag)
+        return if (closeIdx == -1) {
+            ParsedResponse(afterOpen.trim(), "")
         } else {
-            return
-        }
-
-        // Add user bubble
-        val userMsg = ChatMessage(
-            text = promptText,
-            imagePath = localImageFile?.absolutePath,
-            isUser = true
-        )
-        _messages.value = _messages.value + userMsg
-
-        // Add placeholder bot bubble with initial benchmarking state
-        val botMsgId = System.nanoTime()
-        val botMsg = ChatMessage(
-            id = botMsgId,
-            text = "",
-            isUser = false,
-            isStreaming = true,
-            benchmark = com.example.on_device_qwen.model.BenchmarkMetrics(
-                ttftMs = 0,
-                decodeTps = 0.0,
-                decodeTokens = 0,
-                totalDurationMs = 0,
-                backend = activeBackendName
-            )
-        )
-        _messages.value = _messages.value + botMsg
-
-        _isGenerating.value = true
-
-        viewModelScope.launch {
-            try {
-                val buffer = StringBuilder()
-                withContext(Dispatchers.IO) {
-                    if (localImageFile != null) {
-                        val contents = Contents.of(
-                            Content.ImageFile(localImageFile.absolutePath),
-                            Content.Text(promptText)
-                        )
-                        conversation!!.sendMessageAsync(contents).collect { msg ->
-                            val now = System.currentTimeMillis()
-                            if (firstTokenMs == null) {
-                                firstTokenMs = now
-                            }
-                            chunkCount++
-                            val textPiece = msg.contents.contents
-                                .filterIsInstance<Content.Text>()
-                                .joinToString("") { it.text }
-                            buffer.append(textPiece)
-                            val currentText = buffer.toString()
-
-                            val ttft = (firstTokenMs!! - startMs).coerceAtLeast(0)
-                            val decodeDurationSec = (now - firstTokenMs!!) / 1000.0
-                            val liveTps = if (decodeDurationSec > 0.05) chunkCount / decodeDurationSec else 0.0
-
-                            val liveMetrics = com.example.on_device_qwen.model.BenchmarkMetrics(
-                                ttftMs = ttft,
-                                decodeTps = liveTps,
-                                decodeTokens = chunkCount,
-                                totalDurationMs = now - startMs,
-                                backend = activeBackendName
-                            )
-
-                            withContext(Dispatchers.Main) {
-                                _messages.value = _messages.value.map { m ->
-                                    if (m.id == botMsgId) m.copy(
-                                        text = currentText,
-                                        isStreaming = true,
-                                        benchmark = liveMetrics
-                                    ) else m
-                                }
-                            }
-                        }
-                    } else {
-                        conversation!!.sendMessageAsync(promptText).collect { chunk ->
-                            val now = System.currentTimeMillis()
-                            if (firstTokenMs == null) {
-                                firstTokenMs = now
-                            }
-                            chunkCount++
-                            buffer.append(chunk)
-                            val currentText = buffer.toString()
-
-                            val ttft = (firstTokenMs!! - startMs).coerceAtLeast(0)
-                            val decodeDurationSec = (now - firstTokenMs!!) / 1000.0
-                            val liveTps = if (decodeDurationSec > 0.05) chunkCount / decodeDurationSec else 0.0
-
-                            val liveMetrics = com.example.on_device_qwen.model.BenchmarkMetrics(
-                                ttftMs = ttft,
-                                decodeTps = liveTps,
-                                decodeTokens = chunkCount,
-                                totalDurationMs = now - startMs,
-                                backend = activeBackendName
-                            )
-
-                            withContext(Dispatchers.Main) {
-                                _messages.value = _messages.value.map { m ->
-                                    if (m.id == botMsgId) m.copy(
-                                        text = currentText,
-                                        isStreaming = true,
-                                        benchmark = liveMetrics
-                                    ) else m
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Streaming finished: query LiteRT-LM engine for hardware-level benchmark info
-                val finalTotalDurationMs = System.currentTimeMillis() - startMs
-                val benchInfo = withContext(Dispatchers.IO) {
-                    try {
-                        conversation?.getBenchmarkInfo()
-                    } catch (_: Exception) {
-                        null
-                    }
-                }
-
-                val finalMetrics = if (benchInfo != null && benchInfo.lastDecodeTokensPerSecond > 0) {
-                    val ttft = (benchInfo.timeToFirstTokenInSecond * 1000).toLong().coerceAtLeast(0)
-                    com.example.on_device_qwen.model.BenchmarkMetrics(
-                        ttftMs = if (ttft > 0) ttft else ((firstTokenMs ?: System.currentTimeMillis()) - startMs).coerceAtLeast(0),
-                        decodeTps = benchInfo.lastDecodeTokensPerSecond,
-                        prefillTps = if (benchInfo.lastPrefillTokensPerSecond > 0) benchInfo.lastPrefillTokensPerSecond else null,
-                        prefillTokens = if (benchInfo.lastPrefillTokenCount > 0) benchInfo.lastPrefillTokenCount else null,
-                        decodeTokens = if (benchInfo.lastDecodeTokenCount > 0) benchInfo.lastDecodeTokenCount else chunkCount,
-                        totalDurationMs = finalTotalDurationMs,
-                        backend = activeBackendName
-                    )
-                } else {
-                    val ttft = ((firstTokenMs ?: System.currentTimeMillis()) - startMs).coerceAtLeast(0)
-                    val decodeDurationSec = (finalTotalDurationMs - ttft) / 1000.0
-                    val fallbackTps = if (decodeDurationSec > 0.05) chunkCount / decodeDurationSec else 0.0
-                    com.example.on_device_qwen.model.BenchmarkMetrics(
-                        ttftMs = ttft,
-                        decodeTps = fallbackTps,
-                        decodeTokens = chunkCount,
-                        totalDurationMs = finalTotalDurationMs,
-                        backend = activeBackendName
-                    )
-                }
-
-                // Mark streaming as complete with final benchmark metrics
-                _messages.value = _messages.value.map { msg ->
-                    if (msg.id == botMsgId) msg.copy(
-                        isStreaming = false,
-                        benchmark = finalMetrics
-                    ) else msg
-                }
-            } catch (e: Exception) {
-                _messages.value = _messages.value.map { msg ->
-                    if (msg.id == botMsgId) msg.copy(
-                        text = "⚠️ Error: ${e.localizedMessage ?: e.toString()}",
-                        isStreaming = false
-                    ) else msg
-                }
-            } finally {
-                _isGenerating.value = false
-            }
-        }
-    }
-
-    /**
-     * Clear conversation history and create a fresh session.
-     */
-    fun clearChat() {
-        viewModelScope.launch {
-            _messages.value = emptyList()
-            try {
-                withContext(Dispatchers.IO) {
-                    conversation?.close()
-                    val convConfig = ConversationConfig(
-                        systemInstruction = Contents.of(SYSTEM_PROMPT)
-                    )
-                    conversation = engine?.createConversation(convConfig)
-                }
-            } catch (_: Exception) {
-                // Silently ignore cleanup errors
-            }
+            val think = afterOpen.substring(0, closeIdx).trim()
+            val answer = afterOpen.substring(closeIdx + closeTag.length).trimStart('\n', '\r', ' ')
+            ParsedResponse(think.ifEmpty { null }, answer)
         }
     }
 
     override fun onCleared() {
         super.onCleared()
-        try {
-            conversation?.close()
-            engine?.close()
-        } catch (_: Exception) {
-            // Best-effort cleanup
+        thermalManager.cleanup()
+        viewModelScope.launch {
+            activeEngine?.unloadModel()
         }
-    }
-
-    companion object {
-        /** Expected model filename — change this if you use a different variant. */
-        const val MODEL_FILENAME = "Qwen2.5-3B-Instruct.litertlm"
-
-        const val SYSTEM_PROMPT =
-            "You are Qwen, a helpful and knowledgeable AI assistant created by Alibaba Cloud. " +
-            "You are running locally on this Android device using the LiteRT-LM engine. " +
-            "Be concise, accurate, and helpful. If you are unsure about something, say so."
     }
 }

@@ -11,7 +11,9 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -49,6 +51,7 @@ fun ChatScreen(viewModel: ChatViewModel) {
     val messages by viewModel.messages.collectAsState()
     val isGenerating by viewModel.isGenerating.collectAsState()
     val isVisionModel by viewModel.isVisionModel.collectAsState()
+    val isSpeaking by viewModel.isSpeaking.collectAsState()
     val modelTitle by viewModel.modelTitle.collectAsState()
     val discoveredModels by viewModel.discoveredModels.collectAsState()
     val currentBackend by viewModel.currentBackend.collectAsState()
@@ -243,11 +246,16 @@ fun ChatScreen(viewModel: ChatViewModel) {
                             MessageListView(
                                 messages = messages,
                                 isGenerating = isGenerating,
+                                isSpeaking = isSpeaking,
+                                onSpeak = { viewModel.speak(it) },
+                                onStopSpeaking = { viewModel.stopSpeaking() },
                                 onEditMessage = { msg ->
                                     editingMessage = msg
                                     editText = msg.text
                                 },
                                 onRegenerate = { viewModel.regenerateLastResponse() },
+                                onSelectSuggestion = { suggestion -> viewModel.sendMessage(suggestion) },
+                                getFollowUpSuggestions = { text -> viewModel.getFollowUpSuggestions(text) },
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .weight(1f)
@@ -432,8 +440,13 @@ private fun EmptyChatWelcomeView(
 private fun MessageListView(
     messages: List<ChatMessage>,
     isGenerating: Boolean,
+    isSpeaking: Boolean,
+    onSpeak: (String) -> Unit,
+    onStopSpeaking: () -> Unit,
     onEditMessage: (ChatMessage) -> Unit,
     onRegenerate: () -> Unit,
+    onSelectSuggestion: (String) -> Unit,
+    getFollowUpSuggestions: (String?) -> List<String>,
     modifier: Modifier = Modifier
 ) {
     val listState = rememberLazyListState()
@@ -459,11 +472,23 @@ private fun MessageListView(
         verticalArrangement = Arrangement.spacedBy(18.dp)
     ) {
         items(messages, key = { it.id }) { message ->
+            val isLastMessage = message.id == messages.lastOrNull()?.id
+            val suggestions = if (isLastMessage && !message.isUser && !message.isStreaming && !isGenerating) {
+                remember(message.text) { getFollowUpSuggestions(message.text) }
+            } else {
+                emptyList()
+            }
+
             MessageBubbleItem(
                 message = message,
                 isGenerating = isGenerating,
+                isSpeaking = isSpeaking,
+                suggestions = suggestions,
+                onSpeak = onSpeak,
+                onStopSpeaking = onStopSpeaking,
                 onEditMessage = { onEditMessage(message) },
-                onRegenerate = onRegenerate
+                onRegenerate = onRegenerate,
+                onSelectSuggestion = onSelectSuggestion
             )
         }
     }
@@ -473,8 +498,13 @@ private fun MessageListView(
 private fun MessageBubbleItem(
     message: ChatMessage,
     isGenerating: Boolean,
+    isSpeaking: Boolean,
+    suggestions: List<String>,
+    onSpeak: (String) -> Unit,
+    onStopSpeaking: () -> Unit,
     onEditMessage: () -> Unit,
-    onRegenerate: () -> Unit
+    onRegenerate: () -> Unit,
+    onSelectSuggestion: (String) -> Unit
 ) {
     val isUser = message.isUser
     val context = LocalContext.current
@@ -484,41 +514,61 @@ private fun MessageBubbleItem(
         horizontalAlignment = if (isUser) Alignment.End else Alignment.Start
     ) {
         if (isUser) {
-            // ChatGPT-style User bubble (right-aligned, subtle rounded container)
-            Surface(
-                shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp, bottomStart = 20.dp, bottomEnd = 6.dp),
-                color = MaterialTheme.colorScheme.surfaceVariant,
-                modifier = Modifier
-                    .widthIn(max = 320.dp)
-                    .clip(RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp, bottomStart = 20.dp, bottomEnd = 6.dp))
+            // ChatGPT-style User row with subtle inline Edit icon
+            Row(
+                verticalAlignment = Alignment.Bottom,
+                horizontalArrangement = Arrangement.End,
+                modifier = Modifier.fillMaxWidth()
             ) {
-                Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
-                    message.imagePath?.let { path ->
-                        val bitmap = remember(path) {
-                            try { BitmapFactory.decodeFile(path) } catch (_: Exception) { null }
-                        }
-                        bitmap?.let { bmp ->
-                            Image(
-                                bitmap = bmp.asImageBitmap(),
-                                contentDescription = "Attached photo",
-                                contentScale = ContentScale.Crop,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .heightIn(max = 200.dp)
-                                    .clip(RoundedCornerShape(12.dp))
-                            )
-                            Spacer(Modifier.height(8.dp))
-                        }
-                    }
-                    Text(
-                        text = message.text,
-                        style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 22.sp),
-                        color = MaterialTheme.colorScheme.onSurface
+                IconButton(
+                    onClick = onEditMessage,
+                    modifier = Modifier.size(28.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.Edit,
+                        contentDescription = "Edit message",
+                        modifier = Modifier.size(13.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
                     )
+                }
+
+                Spacer(Modifier.width(4.dp))
+
+                Surface(
+                    shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp, bottomStart = 20.dp, bottomEnd = 6.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    modifier = Modifier
+                        .widthIn(max = 320.dp)
+                        .clip(RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp, bottomStart = 20.dp, bottomEnd = 6.dp))
+                ) {
+                    Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+                        message.imagePath?.let { path ->
+                            val bitmap = remember(path) {
+                                try { BitmapFactory.decodeFile(path) } catch (_: Exception) { null }
+                            }
+                            bitmap?.let { bmp ->
+                                Image(
+                                    bitmap = bmp.asImageBitmap(),
+                                    contentDescription = "Attached photo",
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .heightIn(max = 200.dp)
+                                        .clip(RoundedCornerShape(12.dp))
+                                )
+                                Spacer(Modifier.height(8.dp))
+                            }
+                        }
+                        Text(
+                            text = message.text,
+                            style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 22.sp),
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
                 }
             }
         } else {
-            // ChatGPT-style Assistant response (directly on canvas, no bubble background)
+            // ChatGPT-style Assistant response (directly on canvas)
             Column(modifier = Modifier.fillMaxWidth()) {
                 // Expandable Reasoning Drawer (<think>...</think>)
                 if (!message.thinkText.isNullOrBlank() || (message.isStreaming && message.text.isBlank())) {
@@ -529,10 +579,11 @@ private fun MessageBubbleItem(
                     )
                 }
 
-                // Main Markdown content
+                // Main Markdown content with streaming cursor support
                 if (message.text.isNotEmpty()) {
                     MarkdownText(
                         text = message.text,
+                        isStreaming = message.isStreaming,
                         modifier = Modifier.fillMaxWidth()
                     )
                 } else if (message.isStreaming && message.thinkText.isNullOrBlank()) {
@@ -548,11 +599,12 @@ private fun MessageBubbleItem(
                     )
                 }
 
-                // ChatGPT-style minimal action row: Copy, Share, Regenerate
+                // ChatGPT-style Action Row: Copy, Share, Read Aloud, Regenerate
                 if (!message.isStreaming && message.text.isNotEmpty()) {
                     Row(
                         modifier = Modifier.padding(top = 4.dp),
-                        horizontalArrangement = Arrangement.spacedBy(2.dp)
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
                         IconButton(
                             onClick = {
@@ -568,6 +620,24 @@ private fun MessageBubbleItem(
                                 contentDescription = "Copy",
                                 modifier = Modifier.size(15.dp),
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                            )
+                        }
+
+                        IconButton(
+                            onClick = {
+                                if (isSpeaking) {
+                                    onStopSpeaking()
+                                } else {
+                                    onSpeak(message.text)
+                                }
+                            },
+                            modifier = Modifier.size(30.dp)
+                        ) {
+                            Icon(
+                                imageVector = if (isSpeaking) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
+                                contentDescription = "Read aloud",
+                                modifier = Modifier.size(16.dp),
+                                tint = if (isSpeaking) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
                             )
                         }
 
@@ -601,6 +671,46 @@ private fun MessageBubbleItem(
                                 modifier = Modifier.size(15.dp),
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
                             )
+                        }
+                    }
+                }
+
+                // ChatGPT-style Follow-up Suggestion Chips
+                if (suggestions.isNotEmpty()) {
+                    Spacer(Modifier.height(10.dp))
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        for (suggestion in suggestions) {
+                            Surface(
+                                shape = RoundedCornerShape(16.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)),
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(16.dp))
+                                    .clickable { onSelectSuggestion(suggestion) }
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.AutoAwesome,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(12.dp),
+                                        tint = MaterialTheme.colorScheme.primary
+                                    )
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(
+                                        text = suggestion,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                }
+                            }
                         }
                     }
                 }

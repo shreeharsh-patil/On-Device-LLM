@@ -39,9 +39,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val engineFactory = InferenceEngineFactory(application)
     private val thermalManager = ThermalPerformanceManager(application)
     private val memoryMonitor = MemoryMonitor(application)
+    private val ttsManager = com.example.on_device_qwen.domain.tts.TtsManager(application)
 
     private var activeEngine: InferenceEngine? = null
     private var generationJob: Job? = null
+
+    val isSpeaking: StateFlow<Boolean> = ttsManager.isSpeaking
 
     // ── State Flows ───────────────────────────────────────────────────────────
     private val _engineState = MutableStateFlow<EngineState>(EngineState.Idle)
@@ -547,9 +550,41 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun speak(text: String) {
+        ttsManager.speak(text)
+    }
+
+    fun stopSpeaking() {
+        ttsManager.stop()
+    }
+
+    fun getFollowUpSuggestions(lastAssistantMessage: String?): List<String> {
+        if (lastAssistantMessage.isNullOrBlank()) return emptyList()
+        val lower = lastAssistantMessage.lowercase()
+        val suggestions = mutableListOf<String>()
+
+        if (lower.contains("```") || lower.contains("fun ") || lower.contains("def ") || lower.contains("class ")) {
+            suggestions.add("Explain how this code works")
+            suggestions.add("Write unit tests for this")
+            suggestions.add("Can you optimize this implementation?")
+        } else if (lower.contains("diagram") || lower.contains("graph") || lower.contains("flowchart") || lower.contains("architecture")) {
+            suggestions.add("Show this as a Mermaid flowchart")
+            suggestions.add("Explain the system components step-by-step")
+        } else if (lower.contains("table") || lower.contains("|")) {
+            suggestions.add("Add more details to the comparison table")
+            suggestions.add("What are the key trade-offs?")
+        } else {
+            suggestions.add("Explain in simpler terms")
+            suggestions.add("Give a practical real-world example")
+            suggestions.add("Summarize into 3 key takeaways")
+        }
+        return suggestions.take(3)
+    }
+
     override fun onCleared() {
         super.onCleared()
         thermalManager.cleanup()
+        ttsManager.shutdown()
         viewModelScope.launch {
             activeEngine?.unloadModel()
         }

@@ -104,4 +104,63 @@ class OnDeviceQwenCoreTests {
         assertEquals("GPU", BackendType.GPU.chipText)
         assertEquals("NPU", BackendType.NPU.chipText)
     }
+
+    @Test
+    fun testMarkdownTableParsing() {
+        val tableMarkdown = """
+            | Feature | Supported | Backend |
+            | :--- | :---: | ---: |
+            | LiteRT-LM | Yes | GPU/NPU |
+            | Dolphin 3.0 | Yes | llama.cpp |
+        """.trimIndent()
+
+        val blocks = parseMarkdownBlocks(tableMarkdown)
+        val tableBlock = blocks.filterIsInstance<MarkdownBlock.Table>().firstOrNull()
+
+        assertNotNull("Should parse markdown table", tableBlock)
+        val data = tableBlock!!.tableData
+        assertEquals(3, data.headers.size)
+        assertEquals("Feature", data.headers[0])
+        assertEquals("Supported", data.headers[1])
+        assertEquals("Backend", data.headers[2])
+        assertEquals(2, data.rows.size)
+        assertEquals("LiteRT-LM", data.rows[0][0])
+        assertEquals("Dolphin 3.0", data.rows[1][0])
+        assertEquals(com.example.on_device_qwen.ui.components.TableAlignment.CENTER, data.alignments[1])
+        assertEquals(com.example.on_device_qwen.ui.components.TableAlignment.RIGHT, data.alignments[2])
+    }
+
+    @Test
+    fun testMermaidDiagramDetection() {
+        val mermaidMarkdown = """
+            ```mermaid
+            flowchart TD
+            A[User Input] --> B[Inference Engine]
+            B --> C[Token Stream]
+            ```
+        """.trimIndent()
+
+        val blocks = parseMarkdownBlocks(mermaidMarkdown)
+        val diagramBlock = blocks.filterIsInstance<MarkdownBlock.Diagram>().firstOrNull()
+
+        assertNotNull("Should detect Mermaid diagram block", diagramBlock)
+        assertEquals("mermaid", diagramBlock?.diagramType)
+        assertTrue(diagramBlock?.code?.contains("flowchart TD") == true)
+        assertTrue(diagramBlock?.code?.contains("A[User Input] --> B[Inference Engine]") == true)
+    }
+
+    @Test
+    fun testMathEquationBlockParsing() {
+        val mathMarkdown = """
+            $$
+            E = mc^2 + \int_0^\infty f(x) dx
+            $$
+        """.trimIndent()
+
+        val blocks = parseMarkdownBlocks(mathMarkdown)
+        val mathBlock = blocks.filterIsInstance<MarkdownBlock.MathBlock>().firstOrNull()
+
+        assertNotNull("Should parse math block equation", mathBlock)
+        assertTrue(mathBlock?.equation?.contains("E = mc^2") == true)
+    }
 }

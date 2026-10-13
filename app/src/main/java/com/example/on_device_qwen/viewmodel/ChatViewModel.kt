@@ -309,19 +309,25 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
             generationJob = launch {
                 try {
+                    var lastUiUpdateMs = 0L
                     engine.sendMessage(promptText, localImagePath, config).collect { chunk ->
-                        val parsed = parseReasoningTags(chunk.text)
+                        val now = android.os.SystemClock.elapsedRealtime()
+                        val isComplete = chunk.isComplete
+                        if (isComplete || now - lastUiUpdateMs >= 40L) {
+                            lastUiUpdateMs = now
+                            val parsed = parseReasoningTags(chunk.text)
 
-                        withContext(Dispatchers.Main) {
-                            _messages.value = _messages.value.map { msg ->
-                                if (msg.id == botMsgId) {
-                                    msg.copy(
-                                        text = parsed.answer,
-                                        thinkText = parsed.think,
-                                        isStreaming = !chunk.isComplete,
-                                        benchmark = chunk.metrics
-                                    )
-                                } else msg
+                            withContext(Dispatchers.Main) {
+                                _messages.value = _messages.value.map { msg ->
+                                    if (msg.id == botMsgId) {
+                                        msg.copy(
+                                            text = parsed.answer,
+                                            thinkText = parsed.think,
+                                            isStreaming = !chunk.isComplete,
+                                            benchmark = chunk.metrics
+                                        )
+                                    } else msg
+                                }
                             }
                         }
 

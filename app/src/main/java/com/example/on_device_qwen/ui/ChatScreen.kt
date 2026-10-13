@@ -7,7 +7,6 @@ import android.content.Intent
 import android.graphics.BitmapFactory
 import android.widget.Toast
 import androidx.compose.animation.*
-import androidx.compose.animation.core.*
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -20,13 +19,14 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.shadow
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
@@ -37,9 +37,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.on_device_qwen.model.ChatMessage
-import com.example.on_device_qwen.model.ModelMetadata
 import com.example.on_device_qwen.ui.components.*
-import com.example.on_device_qwen.ui.theme.*
 import com.example.on_device_qwen.viewmodel.ChatViewModel
 import com.example.on_device_qwen.viewmodel.EngineState
 import kotlinx.coroutines.launch
@@ -88,14 +86,15 @@ fun ChatScreen(viewModel: ChatViewModel) {
     if (editingMessage != null) {
         AlertDialog(
             onDismissRequest = { editingMessage = null },
-            title = { Text("Edit Message") },
+            title = { Text("Edit Message", fontWeight = FontWeight.Bold) },
             text = {
                 OutlinedTextField(
                     value = editText,
                     onValueChange = { editText = it },
                     modifier = Modifier.fillMaxWidth(),
                     minLines = 2,
-                    maxLines = 5
+                    maxLines = 5,
+                    shape = RoundedCornerShape(12.dp)
                 )
             },
             confirmButton = {
@@ -204,8 +203,6 @@ fun ChatScreen(viewModel: ChatViewModel) {
                 ChatTopBar(
                     modelTitle = modelTitle,
                     engineState = engineState,
-                    currentBackend = currentBackend,
-                    modelsCount = discoveredModels.size,
                     onOpenDrawer = { coroutineScope.launch { drawerState.open() } },
                     onOpenModelSelector = { showModelManager = true },
                     onNewChat = { viewModel.newChat() }
@@ -270,62 +267,71 @@ fun ChatScreen(viewModel: ChatViewModel) {
     }
 }
 
-// ─── Top App Bar ────────────────────────────────────────────────────────────
+// ─── ChatGPT Top App Bar ───────────────────────────────────────────────────
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ChatTopBar(
     modelTitle: String,
     engineState: EngineState,
-    currentBackend: com.example.on_device_qwen.model.BackendType,
-    modelsCount: Int,
     onOpenDrawer: () -> Unit,
     onOpenModelSelector: () -> Unit,
     onNewChat: () -> Unit
 ) {
     TopAppBar(
         title = {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(12.dp))
-                    .clickable { onOpenModelSelector() }
-                    .padding(horizontal = 6.dp, vertical = 4.dp)
+            Box(
+                modifier = Modifier.fillMaxWidth(),
+                contentAlignment = Alignment.Center
             ) {
-                Text(
-                    text = modelTitle,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Spacer(Modifier.width(4.dp))
-                Icon(
-                    imageVector = Icons.Default.KeyboardArrowDown,
-                    contentDescription = "Switch model",
-                    modifier = Modifier.size(18.dp),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                // Centered pill model selector like ChatGPT
+                Surface(
+                    shape = RoundedCornerShape(20.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(20.dp))
+                        .clickable { onOpenModelSelector() }
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                    ) {
+                        Text(
+                            text = modelTitle,
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Icon(
+                            imageVector = Icons.Default.KeyboardArrowDown,
+                            contentDescription = "Switch model",
+                            modifier = Modifier.size(16.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
             }
         },
         navigationIcon = {
             IconButton(onClick = onOpenDrawer) {
-                Icon(Icons.Default.Menu, contentDescription = "Menu")
+                Icon(Icons.Default.Menu, contentDescription = "Sidebar")
             }
         },
         actions = {
-            // New chat icon
             IconButton(onClick = onNewChat) {
-                Icon(Icons.Default.AddComment, contentDescription = "New chat")
+                Icon(Icons.Outlined.Edit, contentDescription = "New chat")
             }
         },
         colors = TopAppBarDefaults.topAppBarColors(
-            containerColor = MaterialTheme.colorScheme.surface
+            containerColor = MaterialTheme.colorScheme.background
         )
     )
 }
 
-// ─── Empty State (Welcome View) ─────────────────────────────────────────────
+// ─── ChatGPT Empty State (Welcome View) ────────────────────────────────────
 
 @Composable
 private fun EmptyChatWelcomeView(
@@ -342,54 +348,54 @@ private fun EmptyChatWelcomeView(
             horizontalAlignment = Alignment.CenterHorizontally,
             modifier = Modifier.fillMaxWidth()
         ) {
-            // Elegant Qwen Assistant Logo
-            Box(
-                modifier = Modifier
-                    .size(68.dp)
-                    .clip(CircleShape)
-                    .background(
-                        Brush.linearGradient(listOf(QwenPrimary, QwenSecondary))
-                    ),
-                contentAlignment = Alignment.Center
+            // Clean neutral ChatGPT-style emblem
+            Surface(
+                shape = CircleShape,
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
+                modifier = Modifier.size(56.dp)
             ) {
-                Text(
-                    text = "Q",
-                    color = Color.White,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 32.sp
-                )
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        imageVector = Icons.Default.AutoAwesome,
+                        contentDescription = null,
+                        modifier = Modifier.size(26.dp),
+                        tint = MaterialTheme.colorScheme.onSurface
+                    )
+                }
             }
 
-            Spacer(Modifier.height(18.dp))
+            Spacer(Modifier.height(20.dp))
 
             Text(
                 text = "What's on your mind?",
                 style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.Bold
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onBackground
             )
 
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(6.dp))
 
             Text(
-                text = "$modelName • 100% On-Device & Offline",
+                text = "$modelName • 100% On-Device & Private",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
 
-            Spacer(Modifier.height(32.dp))
+            Spacer(Modifier.height(36.dp))
 
-            // Suggested prompt chips
+            // Clean prompt cards
             val promptSuggestions = if (isVisionModel) {
                 listOf(
                     "Describe an uploaded photo in detail",
-                    "Explain quantum computing in simple terms",
-                    "Write a Python script for fast matrix multiplication"
+                    "Explain quantum computing simply",
+                    "Write a Python script for matrix multiplication"
                 )
             } else {
                 listOf(
                     "Explain the difference between CPU and NPU inference",
-                    "Write a concise summary of the theory of relativity",
-                    "Give me 5 productive morning routine habits"
+                    "Summarize the key principles of thermodynamics",
+                    "Write 3 productive habits for software developers"
                 )
             }
 
@@ -400,8 +406,8 @@ private fun EmptyChatWelcomeView(
                 for (prompt in promptSuggestions) {
                     Surface(
                         shape = RoundedCornerShape(14.dp),
-                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)),
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(14.dp))
@@ -410,7 +416,8 @@ private fun EmptyChatWelcomeView(
                         Text(
                             text = prompt,
                             style = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+                            color = MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 13.dp)
                         )
                     }
                 }
@@ -419,7 +426,7 @@ private fun EmptyChatWelcomeView(
     }
 }
 
-// ─── Messages List View ─────────────────────────────────────────────────────
+// ─── Responsive Messages List View ──────────────────────────────────────────
 
 @Composable
 private fun MessageListView(
@@ -432,19 +439,24 @@ private fun MessageListView(
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
 
+    // Smooth auto-scroll only if near bottom to prevent scroll fighting
     LaunchedEffect(messages.size, messages.lastOrNull()?.text?.length) {
         if (messages.isNotEmpty()) {
-            scope.launch {
-                listState.animateScrollToItem(messages.lastIndex)
+            val totalItems = messages.size
+            val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+            if (lastVisible >= totalItems - 3 || !listState.canScrollForward) {
+                scope.launch {
+                    listState.scrollToItem(messages.lastIndex)
+                }
             }
         }
     }
 
     LazyColumn(
         state = listState,
-        modifier = modifier.padding(horizontal = 14.dp),
-        contentPadding = PaddingValues(vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
+        modifier = modifier.padding(horizontal = 16.dp),
+        contentPadding = PaddingValues(top = 10.dp, bottom = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(18.dp)
     ) {
         items(messages, key = { it.id }) { message ->
             MessageBubbleItem(
@@ -472,13 +484,13 @@ private fun MessageBubbleItem(
         horizontalAlignment = if (isUser) Alignment.End else Alignment.Start
     ) {
         if (isUser) {
-            // User message bubble
+            // ChatGPT-style User bubble (right-aligned, subtle rounded container)
             Surface(
-                shape = RoundedCornerShape(20.dp),
-                color = QwenUserBubble,
+                shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp, bottomStart = 20.dp, bottomEnd = 6.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant,
                 modifier = Modifier
                     .widthIn(max = 320.dp)
-                    .clip(RoundedCornerShape(20.dp))
+                    .clip(RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp, bottomStart = 20.dp, bottomEnd = 6.dp))
             ) {
                 Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
                     message.imagePath?.let { path ->
@@ -501,35 +513,13 @@ private fun MessageBubbleItem(
                     Text(
                         text = message.text,
                         style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 22.sp),
-                        color = Color.White
+                        color = MaterialTheme.colorScheme.onSurface
                     )
                 }
             }
         } else {
-            // Assistant response
+            // ChatGPT-style Assistant response (directly on canvas, no bubble background)
             Column(modifier = Modifier.fillMaxWidth()) {
-                // Header row with Qwen icon
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.padding(bottom = 6.dp)
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(24.dp)
-                            .clip(CircleShape)
-                            .background(Brush.linearGradient(listOf(QwenPrimary, QwenSecondary))),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text("Q", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
-                    }
-                    Spacer(Modifier.width(8.dp))
-                    Text(
-                        text = "Qwen",
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                }
-
                 // Expandable Reasoning Drawer (<think>...</think>)
                 if (!message.thinkText.isNullOrBlank() || (message.isStreaming && message.text.isBlank())) {
                     ThinkingSection(
@@ -558,22 +548,27 @@ private fun MessageBubbleItem(
                     )
                 }
 
-                // Message Actions Toolbar (Copy, Share, Regenerate)
+                // ChatGPT-style minimal action row: Copy, Share, Regenerate
                 if (!message.isStreaming && message.text.isNotEmpty()) {
                     Row(
                         modifier = Modifier.padding(top = 4.dp),
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        horizontalArrangement = Arrangement.spacedBy(2.dp)
                     ) {
                         IconButton(
                             onClick = {
                                 val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                                val clip = ClipData.newPlainText("Qwen Response", message.text)
+                                val clip = ClipData.newPlainText("Response", message.text)
                                 clipboard.setPrimaryClip(clip)
-                                Toast.makeText(context, "Copied to clipboard", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, "Copied", Toast.LENGTH_SHORT).show()
                             },
-                            modifier = Modifier.size(32.dp)
+                            modifier = Modifier.size(30.dp)
                         ) {
-                            Icon(Icons.Default.ContentCopy, contentDescription = "Copy", modifier = Modifier.size(16.dp))
+                            Icon(
+                                Icons.Default.ContentCopy,
+                                contentDescription = "Copy",
+                                modifier = Modifier.size(15.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                            )
                         }
 
                         IconButton(
@@ -585,17 +580,27 @@ private fun MessageBubbleItem(
                                 }
                                 context.startActivity(Intent.createChooser(sendIntent, "Share response"))
                             },
-                            modifier = Modifier.size(32.dp)
+                            modifier = Modifier.size(30.dp)
                         ) {
-                            Icon(Icons.Default.Share, contentDescription = "Share", modifier = Modifier.size(16.dp))
+                            Icon(
+                                Icons.Outlined.Share,
+                                contentDescription = "Share",
+                                modifier = Modifier.size(15.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                            )
                         }
 
                         IconButton(
                             onClick = onRegenerate,
                             enabled = !isGenerating,
-                            modifier = Modifier.size(32.dp)
+                            modifier = Modifier.size(30.dp)
                         ) {
-                            Icon(Icons.Default.Refresh, contentDescription = "Regenerate", modifier = Modifier.size(16.dp))
+                            Icon(
+                                Icons.Outlined.Refresh,
+                                contentDescription = "Regenerate",
+                                modifier = Modifier.size(15.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                            )
                         }
                     }
                 }
@@ -620,26 +625,34 @@ private fun EngineStatusOverlay(
         ) {
             when (state) {
                 is EngineState.Idle -> {
-                    GlowingQLogo()
-                    Spacer(Modifier.height(24.dp))
+                    Surface(
+                        shape = CircleShape,
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
+                        modifier = Modifier.size(60.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(Icons.Default.Memory, contentDescription = null, modifier = Modifier.size(30.dp))
+                        }
+                    }
+                    Spacer(Modifier.height(20.dp))
                     Text(
-                        "On-Device Qwen 2.0",
-                        style = MaterialTheme.typography.headlineMedium,
+                        "On-Device AI Assistant",
+                        style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.Bold
                     )
-                    Spacer(Modifier.height(8.dp))
+                    Spacer(Modifier.height(6.dp))
                     Text(
-                        "Offline on-device inference with LiteRT and llama.cpp",
+                        "Offline inference with LiteRT-LM & llama.cpp",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         textAlign = TextAlign.Center
                     )
-                    Spacer(Modifier.height(28.dp))
+                    Spacer(Modifier.height(24.dp))
                     Button(
                         onClick = onRetry,
-                        colors = ButtonDefaults.buttonColors(containerColor = QwenPrimary),
-                        shape = RoundedCornerShape(14.dp),
-                        modifier = Modifier.height(50.dp)
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.height(46.dp)
                     ) {
                         Icon(Icons.Default.PlayArrow, contentDescription = null)
                         Spacer(Modifier.width(8.dp))
@@ -648,10 +661,12 @@ private fun EngineStatusOverlay(
                 }
 
                 is EngineState.Loading -> {
-                    PulsingQLogo()
-                    Spacer(Modifier.height(24.dp))
-                    CircularProgressIndicator(color = QwenPrimary)
-                    Spacer(Modifier.height(16.dp))
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(36.dp),
+                        strokeWidth = 3.dp,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(Modifier.height(20.dp))
                     Text(
                         text = state.progress,
                         style = MaterialTheme.typography.bodyMedium,
@@ -664,39 +679,38 @@ private fun EngineStatusOverlay(
                     Icon(
                         imageVector = Icons.Default.Warning,
                         contentDescription = null,
-                        tint = QwenError,
-                        modifier = Modifier.size(48.dp)
+                        tint = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.size(42.dp)
                     )
-                    Spacer(Modifier.height(16.dp))
+                    Spacer(Modifier.height(14.dp))
                     Surface(
                         color = MaterialTheme.colorScheme.surfaceVariant,
-                        shape = RoundedCornerShape(14.dp),
+                        shape = RoundedCornerShape(12.dp),
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text(
                             text = state.message,
                             style = MaterialTheme.typography.bodySmall,
-                            modifier = Modifier.padding(16.dp)
+                            modifier = Modifier.padding(14.dp)
                         )
                     }
                     Spacer(Modifier.height(16.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         Button(
                             onClick = onRetry,
-                            colors = ButtonDefaults.buttonColors(containerColor = QwenPrimary),
-                            shape = RoundedCornerShape(14.dp)
+                            shape = RoundedCornerShape(10.dp)
                         ) {
-                            Icon(Icons.Default.Refresh, contentDescription = null)
+                            Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
                             Spacer(Modifier.width(6.dp))
                             Text("Retry")
                         }
                         OutlinedButton(
                             onClick = onOpenModelManager,
-                            shape = RoundedCornerShape(14.dp)
+                            shape = RoundedCornerShape(10.dp)
                         ) {
-                            Icon(Icons.Default.Layers, contentDescription = null)
+                            Icon(Icons.Default.Layers, contentDescription = null, modifier = Modifier.size(16.dp))
                             Spacer(Modifier.width(6.dp))
-                            Text("Model Manager")
+                            Text("Models")
                         }
                     }
                 }
@@ -714,59 +728,11 @@ private fun TypingDotsIndicator() {
         modifier = Modifier.padding(vertical = 4.dp)
     ) {
         repeat(3) { index ->
-            val infiniteTransition = rememberInfiniteTransition(label = "dot_$index")
-            val alpha by infiniteTransition.animateFloat(
-                initialValue = 0.3f,
-                targetValue = 1f,
-                animationSpec = infiniteRepeatable(
-                    animation = tween(500, delayMillis = index * 150),
-                    repeatMode = RepeatMode.Reverse
-                ),
-                label = "alpha_$index"
-            )
-            Box(
-                modifier = Modifier
-                    .size(8.dp)
-                    .clip(CircleShape)
-                    .background(QwenPrimary.copy(alpha = alpha))
-            )
+            Surface(
+                shape = CircleShape,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                modifier = Modifier.size(7.dp)
+            ) {}
         }
-    }
-}
-
-@Composable
-private fun GlowingQLogo() {
-    Box(
-        modifier = Modifier
-            .size(76.dp)
-            .shadow(12.dp, CircleShape, ambientColor = QwenPrimary, spotColor = QwenPrimary)
-            .clip(CircleShape)
-            .background(Brush.linearGradient(listOf(QwenPrimary, QwenSecondary))),
-        contentAlignment = Alignment.Center
-    ) {
-        Text("Q", color = Color.White, fontSize = 34.sp, fontWeight = FontWeight.Bold)
-    }
-}
-
-@Composable
-private fun PulsingQLogo() {
-    val infiniteTransition = rememberInfiniteTransition(label = "pulse_q")
-    val scale by infiniteTransition.animateFloat(
-        initialValue = 0.92f,
-        targetValue = 1.08f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(800, easing = EaseInOutCubic),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "pulse_q_scale"
-    )
-    Box(
-        modifier = Modifier
-            .size((76 * scale).dp)
-            .clip(CircleShape)
-            .background(Brush.linearGradient(listOf(QwenPrimary, QwenSecondary))),
-        contentAlignment = Alignment.Center
-    ) {
-        Text("Q", color = Color.White, fontSize = (34 * scale).sp, fontWeight = FontWeight.Bold)
     }
 }

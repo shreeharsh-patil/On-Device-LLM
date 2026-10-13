@@ -98,16 +98,25 @@ class ConversationRepository(context: Context) {
 
     suspend fun deleteConversation(id: String) = withContext(Dispatchers.IO) {
         val db = dbHelper.writableDatabase
-        db.delete(
-            ChatDatabaseHelper.TABLE_MESSAGES,
-            "${ChatDatabaseHelper.COL_MSG_CONV_ID} = ?",
-            arrayOf(id)
-        )
-        db.delete(
-            ChatDatabaseHelper.TABLE_CONVERSATIONS,
-            "${ChatDatabaseHelper.COL_CONV_ID} = ?",
-            arrayOf(id)
-        )
+        // BUG-005 FIX: Use a transaction so both deletes are atomic.
+        // FK CASCADE (ON DELETE CASCADE) handles messages automatically when enabled,
+        // but we keep the explicit delete as a belt-and-suspenders safety measure.
+        db.beginTransaction()
+        try {
+            db.delete(
+                ChatDatabaseHelper.TABLE_MESSAGES,
+                "${ChatDatabaseHelper.COL_MSG_CONV_ID} = ?",
+                arrayOf(id)
+            )
+            db.delete(
+                ChatDatabaseHelper.TABLE_CONVERSATIONS,
+                "${ChatDatabaseHelper.COL_CONV_ID} = ?",
+                arrayOf(id)
+            )
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
     }
 
     suspend fun clearAllConversations() = withContext(Dispatchers.IO) {
@@ -120,12 +129,18 @@ class ConversationRepository(context: Context) {
         if (query.isBlank()) return@withContext getAllConversations()
         val list = mutableListOf<ConversationSession>()
         val db = dbHelper.readableDatabase
-        val pattern = "%${query.trim()}%"
+        // BUG-014 FIX: Escape SQL LIKE wildcard chars so user search for "50% off"
+        // does not accidentally match every conversation.
+        val escapedQuery = query.trim()
+            .replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+        val pattern = "%$escapedQuery%"
         val cursor = db.rawQuery(
             """
             SELECT DISTINCT c.* FROM ${ChatDatabaseHelper.TABLE_CONVERSATIONS} c
             LEFT JOIN ${ChatDatabaseHelper.TABLE_MESSAGES} m ON c.${ChatDatabaseHelper.COL_CONV_ID} = m.${ChatDatabaseHelper.COL_MSG_CONV_ID}
-            WHERE c.${ChatDatabaseHelper.COL_CONV_TITLE} LIKE ? OR m.${ChatDatabaseHelper.COL_MSG_TEXT} LIKE ?
+            WHERE c.${ChatDatabaseHelper.COL_CONV_TITLE} LIKE ? ESCAPE '\' OR m.${ChatDatabaseHelper.COL_MSG_TEXT} LIKE ? ESCAPE '\'
             ORDER BY c.${ChatDatabaseHelper.COL_CONV_UPDATED_AT} DESC
             """.trimIndent(),
             arrayOf(pattern, pattern)

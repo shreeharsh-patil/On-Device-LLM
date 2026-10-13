@@ -146,9 +146,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             prefs.backendType = it
         }
 
-        viewModelScope.launch {
-            _engineState.value = EngineState.Loading("Discovering models on device…")
+        // BUG-015 FIX: Set Loading state synchronously BEFORE launching coroutine to
+        // close the TOCTOU race window where two concurrent initializeEngine() calls
+        // could both pass the guard check before either sets the state.
+        _engineState.value = EngineState.Loading("Discovering models on device…")
 
+        viewModelScope.launch {
             try {
                 // Refresh memory stats
                 val mem = memoryMonitor.getMemoryStatus()
@@ -213,7 +216,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     "Loading ${targetMetadata.name} (${targetMetadata.fileSizeMb} MB) on ${backend.chipText}…\nUsing $threads threads."
                 )
 
-                // Select engine from factory
+                // BUG-016 FIX: Unload previous engine before replacing it so native handles
+                // are freed even if the new engine fails to load.
+                activeEngine?.unloadModel()
                 val engine = engineFactory.getEngineForModel(targetFile)
                 activeEngine = engine
 
@@ -258,6 +263,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         val engine = activeEngine ?: return
         if (!engine.isLoaded) return
 
+        // BUG-006 FIX: Run all setup synchronously in viewModelScope so generationJob
+        // is launched directly from viewModelScope (not nested inside another coroutine).
+        // This ensures generationJob?.cancel() in stopGeneration() is always reliable.
         viewModelScope.launch {
             // Ensure an active conversation session exists in SQLite
             var currentSession = _activeConversation.value
@@ -270,11 +278,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 repository.saveConversation(newSession)
                 _activeConversation.value = newSession
                 currentSession = newSession
-                loadConversations()
+                // BUG-019 FIX: Update local list directly instead of full DB re-fetch
+                _conversations.value = listOf(newSession) + _conversations.value
             }
 
-            // Save local cache image for VLM if attached
-            val localImagePath = imageUri?.let { saveUriToCache(it)?.absolutePath }
+            // BUG-021 FIX: File I/O (contentResolver.openInputStream + copyTo) must run
+            // on Dispatchers.IO, not the main dispatcher used by viewModelScope.launch.
+            val localImagePath = imageUri?.let {
+                withContext(Dispatchers.IO) { saveUriToCache(it)?.absolutePath }
+            }
             val promptText = if (trimmed.isNotEmpty()) trimmed else "Describe this image in detail."
 
             // Add user message to UI and database
@@ -310,7 +322,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 backend = _currentBackend.value
             )
 
-            generationJob = launch {
+            // BUG-006 FIX: generationJob is launched directly from viewModelScope so
+            // stopGeneration()'s generationJob?.cancel() always targets the right Job.
+            val session = currentSession
+            generationJob = viewModelScope.launch {
                 try {
                     var lastUiUpdateMs = 0L
                     engine.sendMessage(promptText, localImagePath, config).collect { chunk ->
@@ -344,7 +359,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 } catch (e: Exception) {
                     val errorMsg = ChatMessage(
                         id = botMsgId,
-                        conversationId = currentSession.id,
+                        conversationId = session.id,
                         text = "⚠️ Error during generation: ${e.localizedMessage ?: e.toString()}",
                         isUser = false,
                         isStreaming = false,
@@ -384,8 +399,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         val currentMsgs = _messages.value
         val lastUserMsg = currentMsgs.lastOrNull { it.isUser } ?: return
 
-        // Remove the last assistant message
-        val updatedMsgs = currentMsgs.filterNot { it.id == currentMsgs.lastOrNull()?.id && !it.isUser }
+        // BUG-007 FIX: Find and remove specifically the last assistant message,
+        // not just the last message (which could be a user message)
+        val lastBotMsg = currentMsgs.lastOrNull { !it.isUser }
+        val updatedMsgs = if (lastBotMsg != null) currentMsgs.filterNot { it.id == lastBotMsg.id } else currentMsgs
         _messages.value = updatedMsgs
 
         sendMessage(lastUserMsg.text, lastUserMsg.imagePath?.let { Uri.fromFile(File(it)) })
@@ -474,7 +491,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             _importProgress.value = null
 
             if (result.isSuccess) {
-                val file = result.getOrNull()!!
+                // BUG-027 FIX: getOrNull()!! is contradictory — getOrNull avoids throws
+                // but !! immediately re-introduces NPE. Use getOrElse instead.
+                val file = result.getOrElse { return@launch }
                 initializeEngine(explicitModelFile = file)
             }
         }
@@ -585,8 +604,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         super.onCleared()
         thermalManager.cleanup()
         ttsManager.shutdown()
-        viewModelScope.launch {
-            activeEngine?.unloadModel()
-        }
+        // BUG-001 FIX: viewModelScope is cancelled by super.onCleared() before any
+        // new coroutine can execute inside it. Use runBlocking to synchronously unload
+        // native engine handles, preventing JNI memory / file-lock leaks.
+        try {
+            kotlinx.coroutines.runBlocking(kotlinx.coroutines.Dispatchers.IO) {
+                activeEngine?.unloadModel()
+            }
+        } catch (_: Exception) {}
     }
 }

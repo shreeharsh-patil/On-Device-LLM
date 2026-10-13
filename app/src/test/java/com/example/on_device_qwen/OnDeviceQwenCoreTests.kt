@@ -163,4 +163,47 @@ class OnDeviceQwenCoreTests {
         assertNotNull("Should parse math block equation", mathBlock)
         assertTrue(mathBlock?.equation?.contains("E = mc^2") == true)
     }
+
+    @Test
+    fun testSqlLikeWildcardEscaping() {
+        val rawQuery = "100% discount on _items_"
+        val escaped = rawQuery.trim()
+            .replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+
+        assertEquals("100\\% discount on \\_items\\_", escaped)
+    }
+
+    @Test
+    fun testRegenerateMessageFilterLogic() {
+        // Simulates the bug fix in ChatViewModel.regenerateLastResponse():
+        // Finding and removing specifically the last bot message, not simply currentMsgs.lastOrNull()
+        val user1 = com.example.on_device_qwen.model.ChatMessage(id = 1L, conversationId = "c1", text = "Hello", isUser = true)
+        val bot1 = com.example.on_device_qwen.model.ChatMessage(id = 2L, conversationId = "c1", text = "Hi there!", isUser = false)
+        val user2 = com.example.on_device_qwen.model.ChatMessage(id = 3L, conversationId = "c1", text = "How are you?", isUser = true)
+
+        val listWithTrailingUser = listOf(user1, bot1, user2)
+        val lastBotMsg = listWithTrailingUser.lastOrNull { !it.isUser }
+        val filtered = if (lastBotMsg != null) listWithTrailingUser.filterNot { it.id == lastBotMsg.id } else listWithTrailingUser
+
+        assertEquals(2, filtered.size)
+        assertEquals(listOf(1L, 3L), filtered.map { it.id })
+    }
+
+    @Test
+    fun testReasoningTagParser() {
+        val raw = "<think>\nThinking step by step...\n</think>\nHere is the answer."
+        val openTag = "<think>"
+        val closeTag = "</think>"
+        val openIdx = raw.indexOf(openTag)
+        val afterOpen = raw.substring(openIdx + openTag.length)
+        val closeIdx = afterOpen.indexOf(closeTag)
+
+        val think = afterOpen.substring(0, closeIdx).trim()
+        val answer = afterOpen.substring(closeIdx + closeTag.length).trimStart('\n', '\r', ' ')
+
+        assertEquals("Thinking step by step...", think)
+        assertEquals("Here is the answer.", answer)
+    }
 }

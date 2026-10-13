@@ -53,9 +53,20 @@ class ChatDatabaseHelper(context: Context) : SQLiteOpenHelper(
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        db.execSQL("DROP TABLE IF EXISTS $TABLE_MESSAGES")
-        db.execSQL("DROP TABLE IF EXISTS $TABLE_CONVERSATIONS")
-        onCreate(db)
+        // BUG-020 FIX: Never use DROP TABLE in onUpgrade — it destroys all user data.
+        // Use additive ALTER TABLE migrations for each version step.
+        // Current version is 1. Future migrations should follow this pattern:
+        //
+        //   if (oldVersion < 2) {
+        //       db.execSQL("ALTER TABLE $TABLE_MESSAGES ADD COLUMN new_column TEXT DEFAULT ''")
+        //   }
+        //   if (oldVersion < 3) { ... }
+        //
+        // For any schema changes that truly cannot be done with ALTER TABLE (e.g., column
+        // rename / type change), copy data to a temp table, recreate, and copy back.
+        //
+        // If migration is impossible (e.g., completely incompatible schema), preserve data
+        // integrity by exporting before dropping, never silently destroying user history.
     }
 
     override fun onConfigure(db: SQLiteDatabase) {

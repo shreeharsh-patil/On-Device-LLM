@@ -75,6 +75,9 @@ class LlamaCppInferenceEngine(private val context: Context) : InferenceEngine {
         _isCancelled.set(false)
     }
 
+    // Persistent buffer reused across calls; always reset at start of generation.
+    private val tokenBuffer = ByteArrayOutputStream(4096)
+
     override fun sendMessage(
         prompt: String,
         imagePath: String?,
@@ -87,7 +90,9 @@ class LlamaCppInferenceEngine(private val context: Context) : InferenceEngine {
         val startMs = System.currentTimeMillis()
         var firstTokenMs: Long? = null
         var chunkCount = 0
-        val buffer = ByteArrayOutputStream()
+        // Reset buffer before each new generation to prevent stale token data bleeding through
+        tokenBuffer.reset()
+        val buffer = tokenBuffer
         val backendLabel = "llama.cpp • CPU (${config.threadCount} threads)"
 
         // Format prompt using Dolphin / Qwen ChatML standard template

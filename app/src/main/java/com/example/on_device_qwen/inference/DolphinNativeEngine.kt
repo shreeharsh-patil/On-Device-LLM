@@ -36,42 +36,42 @@ class DolphinNativeEngine : Closeable {
         require(file.isFile && file.canRead() && file.length() > 512 * 1024) {
             "Readable GGUF model required: ${file.absolutePath}"
         }
+        // Always close any prior session safely before loading a new one
         close()
+
+        if (!isNativeLoaded) {
+            throw UnsupportedOperationException(
+                "Native llama.cpp library (libdolphin_gguf.so) is not available on this ABI. " +
+                "GGUF inference requires an arm64-v8a device with the native library present."
+            )
+        }
 
         val processors = Runtime.getRuntime().availableProcessors()
         val threads = requestedThreads.coerceIn(1, (processors - 1).coerceAtLeast(1))
 
-        if (isNativeLoaded) {
-            modelHandle = nativeOpen(file.absolutePath, contextSize, threads)
-            check(modelHandle != 0L) { "Native llama.cpp engine was unable to load GGUF model" }
-        } else {
-            // Simulated handle if native binary not linked in current ABI
-            modelHandle = System.currentTimeMillis()
-        }
+        modelHandle = nativeOpen(file.absolutePath, contextSize, threads)
+        check(modelHandle != 0L) { "Native llama.cpp engine was unable to load GGUF model: ${file.name}" }
         isClosed.set(false)
     }
 
     fun generate(prompt: String, maxTokens: Int = 1024, listener: ChunkListener): Int {
-        check(modelHandle != 0L && !isClosed.get()) { "GGUF model is not loaded" }
+        check(isNativeLoaded) { "Native llama.cpp library is not available on this device ABI" }
+        check(modelHandle != 0L && !isClosed.get()) { "GGUF model is not loaded — call load() before generate()" }
 
-        return if (isNativeLoaded) {
-            nativeGenerate(modelHandle, prompt, maxTokens, listener)
-        } else {
-            // Fallback simulation: emits UTF-8 chunks
-            val fallbackResponse = "I am running on-device with GGUF inference.\nAll processing is offline and private."
-            val bytes = fallbackResponse.toByteArray(Charsets.UTF_8)
-            listener.onBytes(bytes)
-            bytes.size
-        }
+        return nativeGenerate(modelHandle, prompt, maxTokens, listener)
     }
 
     override fun close() {
-        if (modelHandle != 0L) {
-            if (isNativeLoaded) {
-                nativeClose(modelHandle)
+        // Idempotent: safe to call even if already closed or handle is 0
+        val handle = modelHandle
+        modelHandle = 0L
+        isClosed.set(true)
+        if (handle != 0L && isNativeLoaded) {
+            try {
+                nativeClose(handle)
+            } catch (_: Throwable) {
+                // Suppress native exceptions during close to avoid crash-on-cleanup
             }
-            modelHandle = 0L
-            isClosed.set(true)
         }
     }
 

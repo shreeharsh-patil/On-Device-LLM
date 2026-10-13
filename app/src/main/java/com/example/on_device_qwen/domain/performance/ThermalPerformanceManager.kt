@@ -20,9 +20,12 @@ enum class DeviceThermalState(val label: String, val isWarning: Boolean) {
     CRITICAL("Critical Heat — Pausing", true)
 }
 
-class ThermalPerformanceManager(private val context: Context) {
+class ThermalPerformanceManager(context: Context) {
 
-    private val powerManager = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+    // BUG-011 FIX: Always use applicationContext to prevent Activity context leaks
+    // across configuration changes (ThermalPerformanceManager lives in the ViewModel scope).
+    private val context = context.applicationContext
+    private val powerManager = this.context.getSystemService(Context.POWER_SERVICE) as? PowerManager
 
     private val _thermalState = MutableStateFlow(DeviceThermalState.NOMINAL)
     val thermalState: StateFlow<DeviceThermalState> = _thermalState.asStateFlow()
@@ -80,15 +83,25 @@ class ThermalPerformanceManager(private val context: Context) {
                 }
             }
             try {
-                powerManager.addThermalStatusListener(context.mainExecutor, thermalListener!!)
-            } catch (_: Exception) {}
+                powerManager.addThermalStatusListener(this.context.mainExecutor, thermalListener!!)
+            } catch (e: Exception) {
+                // BUG-012 FIX: Log failure so it's diagnosable; thermal state will remain NOMINAL
+                android.util.Log.w("ThermalMgr", "Failed to register thermal status listener — thermal throttling disabled", e)
+                thermalListener = null
+            }
         }
     }
 
     private fun registerBatteryReceiver() {
         try {
             val filter = IntentFilter(Intent.ACTION_BATTERY_CHANGED)
-            context.registerReceiver(batteryReceiver, filter)
+            // BUG-024 FIX: Specify RECEIVER_NOT_EXPORTED on Android 14+ (API 34) to comply
+            // with the new dynamic receiver export requirement.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                this.context.registerReceiver(batteryReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                this.context.registerReceiver(batteryReceiver, filter)
+            }
         } catch (_: Exception) {}
     }
 

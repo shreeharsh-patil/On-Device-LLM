@@ -6,7 +6,7 @@ import com.google.ai.edge.litertlm.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -80,7 +80,11 @@ class LiteRTInferenceEngine(private val context: Context) : InferenceEngine {
             val convConfig = ConversationConfig(
                 systemInstruction = Contents.of(config.systemPrompt)
             )
-            conversation = engine!!.createConversation(convConfig)
+            // BUG-028 FIX: Use safe null check instead of engine!! to produce a clear
+            // error if both primary and CPU fallback engine construction fail.
+            val initializedEngine = engine
+                ?: throw IllegalStateException("LiteRT Engine failed to initialize (both GPU/NPU and CPU fallback)")
+            conversation = initializedEngine.createConversation(convConfig)
 
             _activeModel = ModelMetadata(
                 file = modelFile,
@@ -120,7 +124,11 @@ class LiteRTInferenceEngine(private val context: Context) : InferenceEngine {
         prompt: String,
         imagePath: String?,
         config: GenerationConfig
-    ): Flow<GenerationChunk> = flow {
+    // BUG-008 FIX: LiteRTInferenceEngine was using flow{} but calling emit() from inside
+    // sendMessageAsync().collect{} — a cross-coroutine emission that violates flow invariants
+    // and can throw IllegalStateException. channelFlow{} with trySend() is the correct builder
+    // for async, cross-coroutine streaming.
+    ): Flow<GenerationChunk> = channelFlow {
         val activeConv = conversation ?: throw IllegalStateException("Model is not loaded")
         _isGenerating.set(true)
         _isCancelled.set(false)
@@ -159,7 +167,7 @@ class LiteRTInferenceEngine(private val context: Context) : InferenceEngine {
                         totalDurationMs = now - startMs,
                         backend = backendLabel
                     )
-                    emit(GenerationChunk(text = buffer.toString(), isComplete = false, metrics = liveMetrics))
+                    trySend(GenerationChunk(text = buffer.toString(), isComplete = false, metrics = liveMetrics))
                 }
             } else {
                 activeConv.sendMessageAsync(prompt).collect { chunk ->
@@ -181,7 +189,7 @@ class LiteRTInferenceEngine(private val context: Context) : InferenceEngine {
                         totalDurationMs = now - startMs,
                         backend = backendLabel
                     )
-                    emit(GenerationChunk(text = buffer.toString(), isComplete = false, metrics = liveMetrics))
+                    trySend(GenerationChunk(text = buffer.toString(), isComplete = false, metrics = liveMetrics))
                 }
             }
 
@@ -213,7 +221,7 @@ class LiteRTInferenceEngine(private val context: Context) : InferenceEngine {
             }
 
             lastBenchmark = finalMetrics
-            emit(GenerationChunk(text = buffer.toString(), isComplete = true, metrics = finalMetrics))
+            trySend(GenerationChunk(text = buffer.toString(), isComplete = true, metrics = finalMetrics))
 
         } catch (e: CancellationException) {
             val totalMs = System.currentTimeMillis() - startMs
@@ -224,7 +232,7 @@ class LiteRTInferenceEngine(private val context: Context) : InferenceEngine {
                 totalDurationMs = totalMs,
                 backend = backendLabel
             )
-            emit(GenerationChunk(text = buffer.toString(), isComplete = true, metrics = cancelledMetrics))
+            trySend(GenerationChunk(text = buffer.toString(), isComplete = true, metrics = cancelledMetrics))
         } finally {
             _isGenerating.set(false)
         }

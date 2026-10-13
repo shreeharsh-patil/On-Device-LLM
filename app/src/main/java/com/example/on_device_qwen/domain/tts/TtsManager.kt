@@ -40,6 +40,11 @@ class TtsManager(context: Context) : TextToSpeech.OnInitListener {
         if (status == TextToSpeech.SUCCESS) {
             tts?.language = Locale.getDefault()
             isInitialized = true
+        } else {
+            // BUG-009 FIX: Shutdown the broken TTS engine instead of leaving a zombie object alive
+            tts?.shutdown()
+            tts = null
+            isInitialized = false
         }
     }
 
@@ -51,8 +56,12 @@ class TtsManager(context: Context) : TextToSpeech.OnInitListener {
         if (cleanedText.isBlank()) return
 
         val utteranceId = "msg_${System.currentTimeMillis()}"
-        _isSpeaking.value = true
-        tts?.speak(cleanedText, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
+        // BUG-010 FIX: Only set _isSpeaking=true if speak() succeeds; avoids stuck
+        // "speaking" state when the TTS engine returns ERROR silently.
+        val result = tts?.speak(cleanedText, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
+        if (result == TextToSpeech.SUCCESS) {
+            _isSpeaking.value = true
+        }
     }
 
     fun stop() {

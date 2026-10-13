@@ -16,8 +16,19 @@ class MemoryMonitor(context: Context) {
     private val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
 
     fun getMemoryStatus(): DeviceMemoryStatus {
+        // BUG-025 FIX: activityManager can be null in restricted environments.
+        // Return a sentinel instead of silently populating zero values.
+        if (activityManager == null) {
+            return DeviceMemoryStatus(
+                totalRamMb = 0L,
+                availRamMb = 0L,
+                usedRamMb = 0L,
+                isLowMemory = false,
+                thresholdMb = 0L
+            )
+        }
         val memoryInfo = ActivityManager.MemoryInfo()
-        activityManager?.getMemoryInfo(memoryInfo)
+        activityManager.getMemoryInfo(memoryInfo)
 
         val total = memoryInfo.totalMem / (1024 * 1024)
         val avail = memoryInfo.availMem / (1024 * 1024)

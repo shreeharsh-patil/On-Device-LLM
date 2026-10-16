@@ -6,6 +6,20 @@ plugins {
     alias(libs.plugins.compose.compiler)
 }
 
+// Release secrets must never be committed. All four variables are required to sign
+// production APKs; without them Gradle can still build and test debug variants.
+val releaseKeystorePath = providers.environmentVariable("ANDROID_KEYSTORE_PATH").orNull
+val releaseKeystorePassword = providers.environmentVariable("ANDROID_KEYSTORE_PASSWORD").orNull
+val releaseKeyAlias = providers.environmentVariable("ANDROID_KEY_ALIAS").orNull
+val releaseKeyPassword = providers.environmentVariable("ANDROID_KEY_PASSWORD").orNull
+val hasReleaseSigning = listOf(
+    releaseKeystorePath,
+    releaseKeystorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword
+).all { !it.isNullOrBlank() }
+
+
 android {
     namespace = "com.example.on_device_qwen"
     compileSdk = 37
@@ -38,16 +52,20 @@ android {
         }
     }
 
+    // Local and CI debug builds use Android's automatically generated debug keystore.
+    // Production releases use a separately managed keystore via environment variables.
     signingConfigs {
-        create("release") {
-            storeFile = file("release.keystore")
-            storePassword = "ondeviceqwen"
-            keyAlias = "on_device_llm"
-            keyPassword = "ondeviceqwen"
-            enableV1Signing = true
-            enableV2Signing = true
-            enableV3Signing = true
-            enableV4Signing = false
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = file(releaseKeystorePath!!)
+                storePassword = releaseKeystorePassword!!
+                keyAlias = releaseKeyAlias!!
+                keyPassword = releaseKeyPassword!!
+                enableV1Signing = true
+                enableV2Signing = true
+                enableV3Signing = true
+                enableV4Signing = false
+            }
         }
     }
 
@@ -63,11 +81,11 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("release")
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
-        debug {
-            signingConfig = signingConfigs.getByName("release")
-        }
+        // Leave debug signing at the Android Gradle Plugin default.
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11

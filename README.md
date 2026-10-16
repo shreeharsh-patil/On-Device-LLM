@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/logo.png" width="160" height="160" alt="On-Device LLM Logo" />
+</p>
+
 # On-Device LLM & Qwen 2.0: Offline AI Assistant 🚀
 
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.4+-purple.svg)](https://kotlinlang.org)

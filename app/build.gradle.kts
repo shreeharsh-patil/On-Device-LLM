@@ -1,5 +1,11 @@
 @file:Suppress("DEPRECATION")
 
+plugins {
+    alias(libs.plugins.android.application)
+    alias(libs.plugins.kotlin.android)
+    alias(libs.plugins.compose.compiler)
+}
+
 // Release secrets must never be committed. All four variables are required to sign
 // production APKs; without them Gradle can still build and test debug variants.
 val releaseKeystorePath = providers.environmentVariable("ANDROID_KEYSTORE_PATH").orNull
@@ -13,11 +19,6 @@ val hasReleaseSigning = listOf(
     releaseKeyPassword
 ).all { !it.isNullOrBlank() }
 
-plugins {
-    alias(libs.plugins.android.application)
-    alias(libs.plugins.kotlin.android)
-    alias(libs.plugins.compose.compiler)
-}
 
 android {
     namespace = "com.example.on_device_qwen"

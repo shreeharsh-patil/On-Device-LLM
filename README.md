@@ -5,6 +5,7 @@
 [![LiteRT-LM](https://img.shields.io/badge/LiteRT--LM-0.17.1-blue.svg)](https://github.com/google-ai-edge/litert-lm)
 [![llama.cpp](https://img.shields.io/badge/llama.cpp-GGUF-orange.svg)](https://github.com/ggml-org/llama.cpp)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![GitHub Release](https://img.shields.io/github/v/release/shreeharsh-patil/On-Device-LLM?color=blue&logo=github)](https://github.com/shreeharsh-patil/On-Device-LLM/releases)
 
 **On-Device LLM** is a privacy-first, 100% offline AI assistant for Android powered by a unified multi-engine architecture (**LiteRT-LM + llama.cpp**). It runs **Dolphin 3.0 Qwen2.5 3B**, **Qwen 2.5**, **Qwen 3**, **Qwen2-VL** multimodal vision models, and less-restricted **Huihui Qwen3.5 Abliterated** models directly on your phone's processor.
 
@@ -72,7 +73,10 @@ Or tap **Model Management > Import Model** in the app to select any `.gguf` or `
 
 ## 🛠️ Building & Installation
 
-### Prerequisites
+### ⬇️ Direct Download (Ready to Install)
+Grab the latest pre-compiled, signed APK from [GitHub Releases](https://github.com/shreeharsh-patil/On-Device-LLM/releases/latest) and install it directly on your Android device (Android 8.0+ / API 26+).
+
+### Prerequisites (For Developers)
 - Android Studio Ladybug / Meerkat or later
 - JDK 17 / 21
 - Android SDK 35+ (compileSdk 37, targetSdk 36, minSdk 26)

@@ -43,12 +43,14 @@ No cloud APIs. No internet connection. Zero data leaving your phone.
 
 | Model | Format | Quantization | Size | Recommended RAM | Source |
 |---|---|---|---|---|---|
-| **Dolphin 3.0 Qwen2.5 3B** | GGUF | Q4_K_M | ~1.9 GB | 3.2 GB | [HuggingFace: bartowski/Dolphin3.0-Qwen2.5-3b-GGUF](https://huggingface.co/bartowski/Dolphin3.0-Qwen2.5-3b-GGUF) |
-| **Huihui Qwen3.5 0.8B Abliterated** | GGUF | Q4_K_M | ~580 MB | 1.2 GB | [HuggingFace: huihui-ai/Qwen3.5-0.8B-Abliterated-GGUF](https://huggingface.co/huihui-ai/Qwen3.5-0.8B-Abliterated-GGUF) |
-| **Huihui Qwen3.5 2B Abliterated** | GGUF | Q4_K_M | ~1.4 GB | 2.4 GB | [HuggingFace: huihui-ai/Qwen3.5-2B-Abliterated-GGUF](https://huggingface.co/huihui-ai/Qwen3.5-2B-Abliterated-GGUF) |
-| **Huihui Qwen3.5 4B Abliterated** | GGUF | Q4_K_M | ~2.6 GB | 4.2 GB | [HuggingFace: huihui-ai/Qwen3.5-4B-Abliterated-GGUF](https://huggingface.co/huihui-ai/Qwen3.5-4B-Abliterated-GGUF) |
-| **Qwen2-VL-2B Multimodal** | LiteRT | INT4 | ~1.8 GB | 2.8 GB | [HuggingFace: litert-community/Qwen2-VL-2B](https://huggingface.co/litert-community/Qwen2-VL-2B) |
-| **Qwen 2.5 1.5B Instruct** | LiteRT | INT4 | ~1.0 GB | 1.8 GB | [HuggingFace: litert-community/Qwen2.5-1.5B-Instruct](https://huggingface.co/litert-community/Qwen2.5-1.5B-Instruct) |
+| **Dolphin 3.0 Qwen2.5 3B** | GGUF | Q4_K_M | ~2.0 GB | 3.2 GB | [HuggingFace: bartowski/Dolphin3.0-Qwen2.5-3b-GGUF](https://huggingface.co/bartowski/Dolphin3.0-Qwen2.5-3b-GGUF) |
+| **Qwen 2.5 0.5B Instruct Abliterated** | GGUF | Q4_K_M | ~398 MB | 0.9 GB | [HuggingFace: mradermacher/Qwen2.5-0.5B-Instruct-abliterated-SFT-i1-GGUF](https://huggingface.co/mradermacher/Qwen2.5-0.5B-Instruct-abliterated-SFT-i1-GGUF) |
+| **Qwen 2.5 Coder 3B Abliterated** | GGUF | Q4_K_M | ~1.9 GB | 2.8 GB | [HuggingFace: bartowski/Qwen2.5-Coder-3B-Instruct-abliterated-GGUF](https://huggingface.co/bartowski/Qwen2.5-Coder-3B-Instruct-abliterated-GGUF) |
+| **Qwen 2.5 Coder 7B Abliterated** | GGUF | Q4_K_M | ~4.7 GB | 5.5 GB | [HuggingFace: bartowski/Qwen2.5-Coder-7B-Instruct-abliterated-GGUF](https://huggingface.co/bartowski/Qwen2.5-Coder-7B-Instruct-abliterated-GGUF) |
+| **Qwen 2.5 1.5B Instruct (GGUF)** | GGUF | Q4_K_M | ~1.1 GB | 1.8 GB | [HuggingFace: Qwen/Qwen2.5-1.5B-Instruct-GGUF](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF) |
+| **Qwen 2.5 1.5B Instruct (LiteRT)** | LiteRT | Q8 | ~1.6 GB | 2.2 GB | [HuggingFace: litert-community/Qwen2.5-1.5B-Instruct](https://huggingface.co/litert-community/Qwen2.5-1.5B-Instruct) |
+| **DeepSeek-R1 Distill Qwen 1.5B** | LiteRT | Q8 | ~1.8 GB | 2.5 GB | [HuggingFace: litert-community/DeepSeek-R1-Distill-Qwen-1.5B](https://huggingface.co/litert-community/DeepSeek-R1-Distill-Qwen-1.5B) |
+| **Qwen2-VL 2B Multimodal** | GGUF | Q4_K_M | ~986 MB | 1.8 GB | [HuggingFace: bartowski/Qwen2-VL-2B-Instruct-GGUF](https://huggingface.co/bartowski/Qwen2-VL-2B-Instruct-GGUF) |
 
 ---
 

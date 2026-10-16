@@ -352,19 +352,33 @@ fun ModelManagerDialog(
                                     Spacer(Modifier.height(10.dp))
 
                                     Row(
-                                        horizontalArrangement = Arrangement.End,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
                                         modifier = Modifier.fillMaxWidth()
                                     ) {
                                         OutlinedButton(
                                             onClick = {
+                                                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(item.effectiveRepoUrl))
+                                                context.startActivity(intent)
+                                            },
+                                            shape = RoundedCornerShape(10.dp),
+                                            modifier = Modifier.weight(1f)
+                                        ) {
+                                            Icon(Icons.Default.OpenInNew, contentDescription = null, modifier = Modifier.size(16.dp))
+                                            Spacer(Modifier.width(4.dp))
+                                            Text("View Repo", fontSize = 12.sp)
+                                        }
+
+                                        Button(
+                                            onClick = {
                                                 val intent = Intent(Intent.ACTION_VIEW, Uri.parse(item.downloadUrl))
                                                 context.startActivity(intent)
                                             },
-                                            shape = RoundedCornerShape(10.dp)
+                                            shape = RoundedCornerShape(10.dp),
+                                            modifier = Modifier.weight(1f)
                                         ) {
                                             Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(16.dp))
-                                            Spacer(Modifier.width(6.dp))
-                                            Text("Download from HuggingFace")
+                                            Spacer(Modifier.width(4.dp))
+                                            Text("Download", fontSize = 12.sp)
                                         }
                                     }
                                 }

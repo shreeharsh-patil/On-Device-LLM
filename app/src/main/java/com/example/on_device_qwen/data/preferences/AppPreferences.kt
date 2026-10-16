@@ -26,6 +26,22 @@ class AppPreferences(context: Context) {
         get() = prefs.getString(KEY_ACTIVE_MODEL_PATH, null)
         set(value) = prefs.edit().putString(KEY_ACTIVE_MODEL_PATH, value).apply()
 
+    var registeredModelPaths: Set<String>
+        get() = prefs.getStringSet(KEY_REGISTERED_MODEL_PATHS, emptySet()) ?: emptySet()
+        set(value) = prefs.edit().putStringSet(KEY_REGISTERED_MODEL_PATHS, value).apply()
+
+    fun registerModelPath(path: String) {
+        val current = registeredModelPaths.toMutableSet()
+        current.add(path)
+        registeredModelPaths = current
+    }
+
+    fun unregisterModelPath(path: String) {
+        val current = registeredModelPaths.toMutableSet()
+        current.remove(path)
+        registeredModelPaths = current
+    }
+
     var performanceMode: PerformanceMode
         get() {
             val name = prefs.getString(KEY_PERFORMANCE_MODE, PerformanceMode.BALANCED.name)
@@ -81,6 +97,7 @@ class AppPreferences(context: Context) {
     companion object {
         private const val PREFS_NAME = "on_device_qwen_prefs"
         private const val KEY_ACTIVE_MODEL_PATH = "active_model_path"
+        private const val KEY_REGISTERED_MODEL_PATHS = "registered_model_paths"
         private const val KEY_PERFORMANCE_MODE = "performance_mode"
         private const val KEY_BACKEND_TYPE = "backend_type"
         private const val KEY_TEMPERATURE = "temperature"

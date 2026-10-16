@@ -31,10 +31,33 @@ data class ModelMetadata(
     val hasVision: Boolean = false,
     val isAbliterated: Boolean = false,
     val parameterCount: String = "",
+    val isReadable: Boolean = true,
+    val isCorrupted: Boolean = false,
 ) {
     val fileSizeMb: Long get() = fileSizeBytes / (1024 * 1024)
     val estimatedRamMb: Long get() = estimatedRamBytes / (1024 * 1024)
 }
+
+enum class ModelErrorCode {
+    MODEL_FILE_NOT_FOUND,
+    DOWNLOADED_MODEL_NOT_REGISTERED,
+    FILE_UNREADABLE_OR_PERMISSION_DENIED,
+    UNSUPPORTED_MODEL_FORMAT,
+    MISSING_RUNTIME_OR_INCOMPATIBLE_ABI,
+    INSUFFICIENT_RAM,
+    MODEL_INITIALIZATION_FAILED,
+    INFERENCE_FAILED,
+    UNKNOWN
+}
+
+data class ModelDiagnostic(
+    val errorCode: ModelErrorCode,
+    val title: String,
+    val message: String,
+    val canRequestPermission: Boolean = false,
+    val canOpenFilePicker: Boolean = true,
+    val candidateFiles: List<File> = emptyList()
+)
 
 data class GenerationConfig(
     val temperature: Float = 0.7f,

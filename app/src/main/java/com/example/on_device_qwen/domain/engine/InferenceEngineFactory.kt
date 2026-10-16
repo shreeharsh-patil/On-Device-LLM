@@ -14,7 +14,7 @@ class InferenceEngineFactory(private val context: Context) {
         val extension = file.extension.lowercase()
         return when {
             extension == "gguf" -> llamaCppEngine
-            extension in listOf("litertlm", "litertl") -> liteRtEngine
+            extension in listOf("litertlm", "litertl", "task", "tflite") -> liteRtEngine
             else -> {
                 // If unknown extension, inspect file header magic
                 if (isGgufFile(file)) llamaCppEngine else liteRtEngine

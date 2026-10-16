@@ -4,8 +4,13 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
+import android.os.Build
+import android.provider.Settings
 import android.graphics.BitmapFactory
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
@@ -17,6 +22,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import java.io.File
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -39,6 +45,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.on_device_qwen.model.ChatMessage
+import com.example.on_device_qwen.model.ModelErrorCode
 import com.example.on_device_qwen.ui.components.*
 import com.example.on_device_qwen.viewmodel.ChatViewModel
 import com.example.on_device_qwen.viewmodel.EngineState
@@ -81,6 +88,42 @@ fun ChatScreen(viewModel: ChatViewModel) {
     val coroutineScope = rememberCoroutineScope()
     var showModelManager by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
+
+    val context = LocalContext.current
+    val manageStorageLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) {
+        viewModel.onAppForegrounded()
+    }
+    val storagePermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        if (isGranted) {
+            viewModel.onAppForegrounded()
+        }
+    }
+    val filePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            viewModel.importModel(uri)
+        }
+    }
+    val onRequestPermission: () -> Unit = {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try {
+                val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+                    data = Uri.parse("package:${context.packageName}")
+                }
+                manageStorageLauncher.launch(intent)
+            } catch (_: Exception) {
+                val fallback = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+                manageStorageLauncher.launch(fallback)
+            }
+        } else {
+            storagePermissionLauncher.launch(android.Manifest.permission.READ_EXTERNAL_STORAGE)
+        }
+    }
 
     // Message editing state
     var editingMessage by remember { mutableStateOf<ChatMessage?>(null) }
@@ -226,6 +269,9 @@ fun ChatScreen(viewModel: ChatViewModel) {
                             state = engineState,
                             onRetry = { viewModel.initializeEngine() },
                             onOpenModelManager = { showModelManager = true },
+                            onRequestPermission = onRequestPermission,
+                            onSelectCandidate = { candidate -> viewModel.switchModel(candidate) },
+                            onOpenFilePicker = { filePickerLauncher.launch(arrayOf("*/*")) },
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .weight(1f)
@@ -726,12 +772,17 @@ private fun EngineStatusOverlay(
     state: EngineState,
     onRetry: () -> Unit,
     onOpenModelManager: () -> Unit,
+    onRequestPermission: () -> Unit,
+    onSelectCandidate: (File) -> Unit,
+    onOpenFilePicker: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     Box(modifier = modifier, contentAlignment = Alignment.Center) {
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
-            modifier = Modifier.padding(32.dp)
+            modifier = Modifier
+                .padding(24.dp)
+                .fillMaxWidth()
         ) {
             when (state) {
                 is EngineState.Idle -> {
@@ -786,13 +837,34 @@ private fun EngineStatusOverlay(
                 }
 
                 is EngineState.Error -> {
+                    val iconVector = when (state.errorCode) {
+                        ModelErrorCode.FILE_UNREADABLE_OR_PERMISSION_DENIED -> Icons.Default.Lock
+                        ModelErrorCode.DOWNLOADED_MODEL_NOT_REGISTERED -> Icons.Default.Done
+                        ModelErrorCode.INSUFFICIENT_RAM -> Icons.Default.Memory
+                        else -> Icons.Default.Warning
+                    }
+                    val iconTint = when (state.errorCode) {
+                        ModelErrorCode.DOWNLOADED_MODEL_NOT_REGISTERED -> MaterialTheme.colorScheme.primary
+                        else -> MaterialTheme.colorScheme.error
+                    }
+
                     Icon(
-                        imageVector = Icons.Default.Warning,
+                        imageVector = iconVector,
                         contentDescription = null,
-                        tint = MaterialTheme.colorScheme.error,
-                        modifier = Modifier.size(42.dp)
+                        tint = iconTint,
+                        modifier = Modifier.size(44.dp)
                     )
                     Spacer(Modifier.height(14.dp))
+
+                    Text(
+                        text = state.title,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        textAlign = TextAlign.Center
+                    )
+
+                    Spacer(Modifier.height(8.dp))
+
                     Surface(
                         color = MaterialTheme.colorScheme.surfaceVariant,
                         shape = RoundedCornerShape(12.dp),
@@ -801,26 +873,95 @@ private fun EngineStatusOverlay(
                         Text(
                             text = state.message,
                             style = MaterialTheme.typography.bodySmall,
-                            modifier = Modifier.padding(14.dp)
+                            modifier = Modifier.padding(14.dp),
+                            textAlign = TextAlign.Center
                         )
                     }
-                    Spacer(Modifier.height(16.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+
+                    // Candidate recovered model ready for one-click load
+                    if (state.candidateFile != null) {
+                        Spacer(Modifier.height(14.dp))
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(12.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Text(
+                                    text = "Discovered: ${state.candidateFile.name}",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                                Spacer(Modifier.height(8.dp))
+                                Button(
+                                    onClick = { onSelectCandidate(state.candidateFile) },
+                                    shape = RoundedCornerShape(10.dp)
+                                ) {
+                                    Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("Load Discovered Model")
+                                }
+                            }
+                        }
+                    }
+
+                    // Storage permission button
+                    if (state.canRequestPermission) {
+                        Spacer(Modifier.height(12.dp))
                         Button(
+                            onClick = onRequestPermission,
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Default.Lock, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text("Grant Storage Permission")
+                        }
+                    }
+
+                    // File picker button for SAF selection
+                    if (state.canOpenFilePicker && state.candidateFile == null) {
+                        Spacer(Modifier.height(10.dp))
+                        OutlinedButton(
+                            onClick = onOpenFilePicker,
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text("Locate Model File (SAF)")
+                        }
+                    }
+
+                    Spacer(Modifier.height(14.dp))
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedButton(
                             onClick = onRetry,
-                            shape = RoundedCornerShape(10.dp)
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier.weight(1f)
                         ) {
                             Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
                             Spacer(Modifier.width(6.dp))
-                            Text("Retry")
+                            Text("Scan Again")
                         }
-                        OutlinedButton(
+                        Button(
                             onClick = onOpenModelManager,
-                            shape = RoundedCornerShape(10.dp)
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier.weight(1f)
                         ) {
                             Icon(Icons.Default.Layers, contentDescription = null, modifier = Modifier.size(16.dp))
                             Spacer(Modifier.width(6.dp))
-                            Text("Models")
+                            Text("Catalog")
                         }
                     }
                 }

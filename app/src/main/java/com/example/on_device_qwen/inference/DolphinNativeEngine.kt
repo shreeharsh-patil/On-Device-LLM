@@ -1,5 +1,7 @@
 package com.example.on_device_qwen.inference
 
+import android.os.Build
+import android.util.Log
 import java.io.Closeable
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
@@ -19,14 +21,23 @@ fun interface ChunkListener {
 class DolphinNativeEngine : Closeable {
 
     companion object {
-        private val isNativeLoaded = try {
-            System.loadLibrary("dolphin_gguf")
-            true
-        } catch (_: Throwable) {
-            false
+        private const val TAG = "DolphinNativeEngine"
+        private var nativeLoadError: Throwable? = null
+
+        private val isNativeLoaded: Boolean by lazy {
+            try {
+                System.loadLibrary("dolphin_gguf")
+                Log.i(TAG, "Successfully loaded libdolphin_gguf.so for ABI: ${Build.SUPPORTED_ABIS.joinToString(", ")}")
+                true
+            } catch (t: Throwable) {
+                nativeLoadError = t
+                Log.e(TAG, "Failed to load libdolphin_gguf.so: ${t.message} (Supported ABIs: ${Build.SUPPORTED_ABIS.joinToString(", ")})", t)
+                false
+            }
         }
 
         fun isAvailable(): Boolean = isNativeLoaded
+        fun getLoadError(): Throwable? = nativeLoadError
     }
 
     private var modelHandle: Long = 0L
@@ -39,9 +50,11 @@ class DolphinNativeEngine : Closeable {
         // Always close any prior session safely before loading a new one
         close()
 
-        if (!isNativeLoaded) {
+        if (!isAvailable()) {
+            val abis = Build.SUPPORTED_ABIS.joinToString(", ")
+            val detail = nativeLoadError?.let { " (${it.javaClass.simpleName}: ${it.message})" } ?: ""
             throw UnsupportedOperationException(
-                "Native llama.cpp library (libdolphin_gguf.so) is not available on this ABI. " +
+                "Native llama.cpp library (libdolphin_gguf.so) is not available on this ABI [$abis]$detail. " +
                 "GGUF inference requires an arm64-v8a device with the native library present."
             )
         }

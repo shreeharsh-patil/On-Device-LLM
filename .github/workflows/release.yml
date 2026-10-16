@@ -51,6 +51,12 @@ jobs:
           cd release-artifacts
           sha256sum OnDeviceLLM-${TAG_NAME}.apk > SHA256SUMS.txt
 
+      - name: Upload Release APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: on-device-llm-release-apk
+          path: release-artifacts/*
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')

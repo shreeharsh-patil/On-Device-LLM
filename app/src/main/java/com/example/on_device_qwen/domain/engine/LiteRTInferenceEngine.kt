@@ -31,6 +31,16 @@ class LiteRTInferenceEngine(private val context: Context) : InferenceEngine {
         try {
             unloadModel()
 
+            if (!modelFile.exists()) {
+                return@withContext Result.failure(java.io.FileNotFoundException("LiteRT model file does not exist: ${modelFile.absolutePath}"))
+            }
+            if (!modelFile.canRead()) {
+                return@withContext Result.failure(SecurityException("LiteRT model file is unreadable (permission denied): ${modelFile.absolutePath}"))
+            }
+            if (modelFile.length() < 512 * 1024) {
+                return@withContext Result.failure(IllegalStateException("LiteRT model file is too small or incomplete (${modelFile.length()} bytes): ${modelFile.name}"))
+            }
+
             val isVlm = modelFile.nameWithoutExtension.lowercase().contains("vl")
             currentBackendType = config.backend
 

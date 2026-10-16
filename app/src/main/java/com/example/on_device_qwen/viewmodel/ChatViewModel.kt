@@ -28,7 +28,14 @@ sealed class EngineState {
     data object Idle : EngineState()
     data class Loading(val progress: String) : EngineState()
     data object Ready : EngineState()
-    data class Error(val message: String) : EngineState()
+    data class Error(
+        val message: String,
+        val title: String = "Engine Error",
+        val errorCode: ModelErrorCode = ModelErrorCode.UNKNOWN,
+        val canRequestPermission: Boolean = false,
+        val canOpenFilePicker: Boolean = true,
+        val candidateFile: File? = null
+    ) : EngineState()
 }
 
 class ChatViewModel(application: Application) : AndroidViewModel(application) {
@@ -158,46 +165,82 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 _availRamMb.value = mem.availRamMb
                 _totalRamMb.value = mem.totalRamMb
 
-                // Scan available models
+                // 1. Scan available models across registered paths, app directories, Downloads, and Documents
                 val allModels = modelRepository.scanModels()
                 _discoveredModels.value = allModels
                 _availableModels.value = allModels.map { it.file }
 
-                val targetFile = explicitModelFile ?: prefs.activeModelPath?.let { File(it) }?.takeIf { it.exists() }
+                // 2. Select target model: explicit request > active preference > first discovered model
+                var targetFile = explicitModelFile?.takeIf { it.exists() && it.canRead() }
+                    ?: prefs.activeModelPath?.let { File(it) }?.takeIf { it.exists() && it.canRead() }
                     ?: allModels.firstOrNull()?.file
 
+                // 3. If still no target, run deep diagnosis (permission check, incomplete downloads, unregistered files)
                 if (targetFile == null) {
-                    _engineState.value = EngineState.Error(
-                        buildString {
-                            appendLine("No compatible model file found!")
-                            appendLine()
-                            appendLine("Please push or import a .litertlm or .gguf model.")
-                            appendLine("Supported:")
-                            appendLine("  • Qwen 2.5 (0.5B, 1.5B, 3B, 7B)")
-                            appendLine("  • Qwen 3 (0.6B, 1.7B, 4B)")
-                            appendLine("  • Qwen 2-VL (Multimodal Vision)")
-                            appendLine("  • Qwen 3 Abliterated GGUF")
-                            appendLine()
-                            appendLine("Use 'Import Model' in the Model Manager or push via ADB:")
-                            appendLine("  adb push <model>.litertlm /sdcard/Download/")
+                    val diag = modelRepository.diagnoseModelStatus()
+
+                    // Auto-recovery: if diagnostic found candidate models, automatically register and select the first one!
+                    if (diag.candidateFiles.isNotEmpty()) {
+                        val recovered = diag.candidateFiles.firstOrNull { it.exists() && it.canRead() }
+                        if (recovered != null) {
+                            prefs.registerModelPath(recovered.absolutePath)
+                            targetFile = recovered
                         }
+                    }
+
+                    if (targetFile == null) {
+                        _engineState.value = EngineState.Error(
+                            title = diag.title,
+                            message = diag.message,
+                            errorCode = diag.errorCode,
+                            canRequestPermission = diag.canRequestPermission,
+                            canOpenFilePicker = diag.canOpenFilePicker,
+                            candidateFile = diag.candidateFiles.firstOrNull()
+                        )
+                        return@launch
+                    }
+                }
+
+                // 4. Validate target file readability
+                if (!targetFile.canRead()) {
+                    _engineState.value = EngineState.Error(
+                        title = "Storage Permission Required",
+                        message = "The model file '${targetFile.name}' is unreadable. Android requires 'All files access' permission or file picker import to access it.",
+                        errorCode = ModelErrorCode.FILE_UNREADABLE_OR_PERMISSION_DENIED,
+                        canRequestPermission = true,
+                        canOpenFilePicker = true,
+                        candidateFile = targetFile
                     )
                     return@launch
                 }
 
+                // 5. Parse or retrieve metadata
                 val targetMetadata = allModels.find { it.file.absolutePath == targetFile.absolutePath }
-                    ?: GgufMetadataParser.parse(targetFile)
+                    ?: modelRepository.parseMetadata(targetFile)
                     ?: ModelMetadata(
                         file = targetFile,
                         name = targetFile.nameWithoutExtension,
-                        format = if (targetFile.extension.equals("gguf", true)) ModelFormat.GGUF else ModelFormat.LITERT,
-                        engineType = if (targetFile.extension.equals("gguf", true)) EngineType.LLAMA_CPP else EngineType.LITERT,
+                        format = if (targetFile.extension.equals("gguf", true) || modelRepository.isGgufBinary(targetFile)) ModelFormat.GGUF else ModelFormat.LITERT,
+                        engineType = if (targetFile.extension.equals("gguf", true) || modelRepository.isGgufBinary(targetFile)) EngineType.LLAMA_CPP else EngineType.LITERT,
                         fileSizeBytes = targetFile.length()
                     )
+
+                // 6. Check RAM requirements before loading
+                val requiredRamMb = targetMetadata.estimatedRamMb
+                if (requiredRamMb > 0 && mem.availRamMb > 0 && mem.availRamMb < requiredRamMb / 2) {
+                    _engineState.value = EngineState.Error(
+                        title = "Insufficient RAM",
+                        message = "Model '${targetMetadata.name}' requires approx ${requiredRamMb}MB RAM, but this device only has ${mem.availRamMb}MB available. Please close background apps or select a smaller model.",
+                        errorCode = ModelErrorCode.INSUFFICIENT_RAM,
+                        canOpenFilePicker = true
+                    )
+                    return@launch
+                }
 
                 _modelTitle.value = targetMetadata.name
                 _isVisionModel.value = targetMetadata.hasVision
                 prefs.activeModelPath = targetFile.absolutePath
+                prefs.registerModelPath(targetFile.absolutePath)
 
                 val backend = _currentBackend.value
                 val threads = thermalManager.getAdaptiveThreadCount(_performanceMode.value, _threadCount.value)
@@ -216,26 +259,53 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     "Loading ${targetMetadata.name} (${targetMetadata.fileSizeMb} MB) on ${backend.chipText}…\nUsing $threads threads."
                 )
 
-                // BUG-016 FIX: Unload previous engine before replacing it so native handles
-                // are freed even if the new engine fails to load.
+                // 7. Unload previous engine before replacing it
                 activeEngine?.unloadModel()
                 val engine = engineFactory.getEngineForModel(targetFile)
                 activeEngine = engine
 
+                // 8. Initialize inference engine
                 val loadResult = engine.loadModel(targetFile, config)
-                if (loadResult.isSuccess) {
+                if (loadResult.isSuccess && engine.isLoaded) {
+                    // 9. Successfully verified! Transition to Ready
                     _engineState.value = EngineState.Ready
                 } else {
+                    val ex = loadResult.exceptionOrNull()
+                    val errorCode = when (ex) {
+                        is UnsupportedOperationException -> ModelErrorCode.MISSING_RUNTIME_OR_INCOMPATIBLE_ABI
+                        is SecurityException -> ModelErrorCode.FILE_UNREADABLE_OR_PERMISSION_DENIED
+                        is java.io.FileNotFoundException -> ModelErrorCode.MODEL_FILE_NOT_FOUND
+                        else -> ModelErrorCode.MODEL_INITIALIZATION_FAILED
+                    }
+                    val title = when (errorCode) {
+                        ModelErrorCode.MISSING_RUNTIME_OR_INCOMPATIBLE_ABI -> "Runtime Architecture Incompatible"
+                        ModelErrorCode.FILE_UNREADABLE_OR_PERMISSION_DENIED -> "Storage Permission Denied"
+                        ModelErrorCode.MODEL_FILE_NOT_FOUND -> "Model File Missing"
+                        else -> "Model Initialization Failed"
+                    }
                     _engineState.value = EngineState.Error(
-                        "Failed to initialize engine:\n${loadResult.exceptionOrNull()?.localizedMessage ?: "Unknown error"}"
+                        title = title,
+                        message = "Could not initialize ${targetMetadata.name}:\n${ex?.localizedMessage ?: "Unknown error"}",
+                        errorCode = errorCode,
+                        canRequestPermission = errorCode == ModelErrorCode.FILE_UNREADABLE_OR_PERMISSION_DENIED,
+                        canOpenFilePicker = true
                     )
                 }
 
             } catch (e: Exception) {
                 _engineState.value = EngineState.Error(
-                    "Engine error: ${e.localizedMessage ?: e.toString()}"
+                    title = "Engine Error",
+                    message = "Unexpected error while setting up AI engine:\n${e.localizedMessage ?: e.toString()}",
+                    errorCode = ModelErrorCode.UNKNOWN,
+                    canOpenFilePicker = true
                 )
             }
+        }
+    }
+
+    fun onAppForegrounded() {
+        if (_engineState.value is EngineState.Error || _engineState.value is EngineState.Idle) {
+            initializeEngine()
         }
     }
 

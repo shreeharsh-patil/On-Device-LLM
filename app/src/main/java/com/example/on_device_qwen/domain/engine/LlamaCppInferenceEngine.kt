@@ -40,6 +40,15 @@ class LlamaCppInferenceEngine(private val context: Context) : InferenceEngine {
                 return@withContext Result.failure(IllegalStateException("Cannot read GGUF model file: ${modelFile.absolutePath}"))
             }
 
+            if (!DolphinNativeEngine.isAvailable()) {
+                return@withContext Result.failure(
+                    UnsupportedOperationException(
+                        "Native llama.cpp engine (libdolphin_gguf.so) is not available for this device architecture. " +
+                        "Please use a LiteRT-LM (.litertlm) model instead."
+                    )
+                )
+            }
+
             // Parse GGUF metadata from binary header
             val metadata = GgufMetadataParser.parse(modelFile) ?: ModelMetadata(
                 file = modelFile,

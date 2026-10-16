@@ -42,8 +42,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.on_device_qwen.R
 import com.example.on_device_qwen.model.ChatMessage
 import com.example.on_device_qwen.model.ModelErrorCode
 import com.example.on_device_qwen.ui.components.*
@@ -402,19 +404,20 @@ private fun EmptyChatWelcomeView(
             horizontalAlignment = Alignment.CenterHorizontally,
             modifier = Modifier.fillMaxWidth()
         ) {
-            // Clean neutral ChatGPT-style emblem
+            // Futuristic Monochrome AI Robot Emblem
             Surface(
                 shape = CircleShape,
                 color = MaterialTheme.colorScheme.surfaceVariant,
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
-                modifier = Modifier.size(56.dp)
+                border = BorderStroke(1.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
+                modifier = Modifier.size(64.dp)
             ) {
                 Box(contentAlignment = Alignment.Center) {
-                    Icon(
-                        imageVector = Icons.Default.AutoAwesome,
-                        contentDescription = null,
-                        modifier = Modifier.size(26.dp),
-                        tint = MaterialTheme.colorScheme.onSurface
+                    Image(
+                        painter = painterResource(id = R.drawable.app_logo),
+                        contentDescription = "AI Robot Emblem",
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .clip(CircleShape)
                     )
                 }
             }

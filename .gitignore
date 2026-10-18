@@ -13,3 +13,8 @@ app/build/
 *.apk
 *.ap_
 *.aab
+
+# Private Android signing keys should never be committed.
+*.keystore
+*.jks
+*.p12

@@ -39,6 +39,7 @@ fun ChatNavigationDrawerContent(
     onDeleteConversation: (ConversationSession) -> Unit,
     onTogglePin: (ConversationSession) -> Unit,
     onOpenModelManager: () -> Unit,
+    onOpenMemory: () -> Unit = {},
     onOpenSettings: () -> Unit,
     batteryPercent: Int,
     batteryTemp: Float,
@@ -299,15 +300,21 @@ fun ChatNavigationDrawerContent(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 TextButton(onClick = onOpenModelManager) {
-                    Icon(Icons.Default.Layers, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text("Models")
+                    Icon(Icons.Default.Layers, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Models", fontSize = 12.sp)
+                }
+
+                TextButton(onClick = onOpenMemory) {
+                    Icon(Icons.Default.Psychology, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Memory", fontSize = 12.sp)
                 }
 
                 TextButton(onClick = onOpenSettings) {
-                    Icon(Icons.Default.Settings, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text("Settings")
+                    Icon(Icons.Default.Settings, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Settings", fontSize = 12.sp)
                 }
             }
 

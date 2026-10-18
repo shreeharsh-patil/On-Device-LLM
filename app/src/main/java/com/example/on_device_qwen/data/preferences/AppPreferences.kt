@@ -18,7 +18,7 @@ enum class PerformanceMode(val displayName: String, val description: String) {
     PERFORMANCE("Performance Mode", "Maximum sustained inference speed and hardware acceleration")
 }
 
-class AppPreferences(context: Context) {
+class AppPreferences(context: Context) : com.example.on_device_qwen.model.IMemoryPreferences {
 
     private val prefs: SharedPreferences = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
@@ -94,6 +94,18 @@ class AppPreferences(context: Context) {
         get() = prefs.getBoolean(KEY_HAPTICS, true)
         set(value) = prefs.edit().putBoolean(KEY_HAPTICS, value).apply()
 
+    override var persistentMemoryEnabled: Boolean
+        get() = prefs.getBoolean(KEY_PERSISTENT_MEMORY_ENABLED, true)
+        set(value) = prefs.edit().putBoolean(KEY_PERSISTENT_MEMORY_ENABLED, value).apply()
+
+    var repetitionPenalty: Float
+        get() = prefs.getFloat(KEY_REPETITION_PENALTY, 1.15f)
+        set(value) = prefs.edit().putFloat(KEY_REPETITION_PENALTY, value).apply()
+
+    override var maxMemoryItems: Int
+        get() = prefs.getInt(KEY_MAX_MEMORY_ITEMS, 4)
+        set(value) = prefs.edit().putInt(KEY_MAX_MEMORY_ITEMS, value).apply()
+
     companion object {
         private const val PREFS_NAME = "on_device_qwen_prefs"
         private const val KEY_ACTIVE_MODEL_PATH = "active_model_path"
@@ -108,5 +120,8 @@ class AppPreferences(context: Context) {
         private const val KEY_THEME_MODE = "theme_mode"
         private const val KEY_THREAD_COUNT = "thread_count"
         private const val KEY_HAPTICS = "haptics"
+        private const val KEY_PERSISTENT_MEMORY_ENABLED = "persistent_memory_enabled"
+        private const val KEY_REPETITION_PENALTY = "repetition_penalty"
+        private const val KEY_MAX_MEMORY_ITEMS = "max_memory_items"
     }
 }

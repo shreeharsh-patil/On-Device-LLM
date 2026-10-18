@@ -199,7 +199,13 @@ class LiteRTInferenceEngine(private val context: Context) : InferenceEngine {
                         totalDurationMs = now - startMs,
                         backend = backendLabel
                     )
-                    trySend(GenerationChunk(text = buffer.toString(), isComplete = false, metrics = liveMetrics))
+                    val liveText = buffer.toString()
+                    trySend(GenerationChunk(
+                        text = liveText,
+                        isComplete = false,
+                        metrics = liveMetrics,
+                        generationId = config.generationId
+                    ))
                 }
             }
 
@@ -231,7 +237,12 @@ class LiteRTInferenceEngine(private val context: Context) : InferenceEngine {
             }
 
             lastBenchmark = finalMetrics
-            trySend(GenerationChunk(text = buffer.toString(), isComplete = true, metrics = finalMetrics))
+            trySend(GenerationChunk(
+                text = buffer.toString(),
+                isComplete = true,
+                metrics = finalMetrics,
+                generationId = config.generationId
+            ))
 
         } catch (e: CancellationException) {
             val totalMs = System.currentTimeMillis() - startMs
@@ -242,7 +253,12 @@ class LiteRTInferenceEngine(private val context: Context) : InferenceEngine {
                 totalDurationMs = totalMs,
                 backend = backendLabel
             )
-            trySend(GenerationChunk(text = buffer.toString(), isComplete = true, metrics = cancelledMetrics))
+            trySend(GenerationChunk(
+                text = buffer.toString(),
+                isComplete = true,
+                metrics = cancelledMetrics,
+                generationId = config.generationId
+            ))
         } finally {
             _isGenerating.set(false)
         }
@@ -251,6 +267,21 @@ class LiteRTInferenceEngine(private val context: Context) : InferenceEngine {
     override fun cancelGeneration() {
         if (_isGenerating.get()) {
             _isCancelled.set(true)
+        }
+    }
+
+    override fun resetConversation() {
+        try {
+            conversation?.close()
+        } catch (_: Exception) {}
+        val eng = engine
+        if (eng != null) {
+            try {
+                val convConfig = ConversationConfig(
+                    systemInstruction = Contents.of(_activeModel?.let { GenerationConfig.DEFAULT_SYSTEM_PROMPT } ?: "")
+                )
+                conversation = eng.createConversation(convConfig)
+            } catch (_: Exception) {}
         }
     }
 

@@ -69,6 +69,11 @@ fun ChatScreen(viewModel: ChatViewModel) {
     val activeConversation by viewModel.activeConversation.collectAsState()
     val searchQuery by viewModel.searchQuery.collectAsState()
 
+    // Persistent Memory
+    val persistentMemoryEnabled by viewModel.persistentMemoryEnabled.collectAsState()
+    val allMemories by viewModel.allMemories.collectAsState()
+    val lastUsedMemories by viewModel.lastUsedMemories.collectAsState()
+
     // Hardware Telemetry
     val thermalState by viewModel.thermalState.collectAsState()
     val batteryTemp by viewModel.batteryTemp.collectAsState()
@@ -89,6 +94,7 @@ fun ChatScreen(viewModel: ChatViewModel) {
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val coroutineScope = rememberCoroutineScope()
     var showModelManager by remember { mutableStateOf(false) }
+    var showMemoryManager by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
 
     val context = LocalContext.current
@@ -179,6 +185,20 @@ fun ChatScreen(viewModel: ChatViewModel) {
         )
     }
 
+    if (showMemoryManager) {
+        MemoryManagerDialog(
+            memories = allMemories,
+            isMemoryEnabled = persistentMemoryEnabled,
+            onToggleMemory = { viewModel.togglePersistentMemory(it) },
+            onSaveMemory = { viewModel.saveMemory(it) },
+            onUpdateMemory = { id, content, cat -> viewModel.updateMemory(id, content, cat) },
+            onDeleteMemory = { viewModel.deleteMemory(it) },
+            onClearAllMemories = { viewModel.clearAllMemories() },
+            onSearchMemories = { viewModel.searchMemories(it) },
+            onDismiss = { showMemoryManager = false }
+        )
+    }
+
     if (showSettings) {
         SettingsDialog(
             performanceMode = performanceMode,
@@ -203,6 +223,12 @@ fun ChatScreen(viewModel: ChatViewModel) {
             isCharging = isCharging,
             availRamMb = availRamMb,
             totalRamMb = totalRamMb,
+            isMemoryEnabled = persistentMemoryEnabled,
+            onToggleMemory = { viewModel.togglePersistentMemory(it) },
+            onManageMemories = {
+                showSettings = false
+                showMemoryManager = true
+            },
             onDismiss = { showSettings = false }
         )
     }
@@ -235,6 +261,10 @@ fun ChatScreen(viewModel: ChatViewModel) {
                 onOpenModelManager = {
                     coroutineScope.launch { drawerState.close() }
                     showModelManager = true
+                },
+                onOpenMemory = {
+                    coroutineScope.launch { drawerState.close() }
+                    showMemoryManager = true
                 },
                 onOpenSettings = {
                     coroutineScope.launch { drawerState.close() }
@@ -295,6 +325,7 @@ fun ChatScreen(viewModel: ChatViewModel) {
                                 messages = messages,
                                 isGenerating = isGenerating,
                                 isSpeaking = isSpeaking,
+                                lastUsedMemories = lastUsedMemories,
                                 onSpeak = { viewModel.speak(it) },
                                 onStopSpeaking = { viewModel.stopSpeaking() },
                                 onEditMessage = { msg ->
@@ -304,6 +335,7 @@ fun ChatScreen(viewModel: ChatViewModel) {
                                 onRegenerate = { viewModel.regenerateLastResponse() },
                                 onSelectSuggestion = { suggestion -> viewModel.sendMessage(suggestion) },
                                 getFollowUpSuggestions = { text -> viewModel.getFollowUpSuggestions(text) },
+                                onOpenMemoryManager = { showMemoryManager = true },
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .weight(1f)
@@ -490,55 +522,159 @@ private fun MessageListView(
     messages: List<ChatMessage>,
     isGenerating: Boolean,
     isSpeaking: Boolean,
+    lastUsedMemories: List<com.example.on_device_qwen.model.MemoryItem> = emptyList(),
     onSpeak: (String) -> Unit,
     onStopSpeaking: () -> Unit,
     onEditMessage: (ChatMessage) -> Unit,
     onRegenerate: () -> Unit,
     onSelectSuggestion: (String) -> Unit,
     getFollowUpSuggestions: (String?) -> List<String>,
+    onOpenMemoryManager: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
 
-    // Smooth auto-scroll only if near bottom to prevent scroll fighting
-    LaunchedEffect(messages.size, messages.lastOrNull()?.text?.length) {
-        if (messages.isNotEmpty()) {
-            val totalItems = messages.size
-            val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
-            if (lastVisible >= totalItems - 3 || !listState.canScrollForward) {
-                scope.launch {
-                    listState.scrollToItem(messages.lastIndex)
-                }
-            }
+    // Follow mode state: user starts in follow mode; manual scroll upward detachment pauses auto-scroll
+    var userScrolledAway by remember { mutableStateOf(false) }
+
+    // When user manually scrolls, check if they detached from the bottom
+    LaunchedEffect(listState.isScrollInProgress) {
+        if (listState.isScrollInProgress) {
+            userScrolledAway = listState.canScrollForward
         }
     }
 
-    LazyColumn(
-        state = listState,
-        modifier = modifier.padding(horizontal = 16.dp),
-        contentPadding = PaddingValues(top = 10.dp, bottom = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(18.dp)
-    ) {
-        items(messages, key = { it.id }) { message ->
-            val isLastMessage = message.id == messages.lastOrNull()?.id
-            val suggestions = if (isLastMessage && !message.isUser && !message.isStreaming && !isGenerating) {
-                remember(message.text) { getFollowUpSuggestions(message.text) }
-            } else {
-                emptyList()
+    // When a new message is posted, snap to the bottom and engage follow mode
+    LaunchedEffect(messages.size) {
+        if (messages.isNotEmpty()) {
+            userScrolledAway = false
+            listState.scrollToItem(messages.lastIndex)
+        }
+    }
+
+    // When generating: auto-scroll ONLY if user is following (not scrolled away!)
+    LaunchedEffect(messages.lastOrNull()?.text?.length) {
+        if (!userScrolledAway && messages.isNotEmpty() && isGenerating) {
+            listState.scrollToItem(messages.lastIndex)
+        }
+    }
+
+    Box(modifier = modifier) {
+        LazyColumn(
+            state = listState,
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 16.dp),
+            contentPadding = PaddingValues(top = 10.dp, bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(18.dp)
+        ) {
+            // Memory context badge at top of conversation if persistent memories were retrieved
+            if (lastUsedMemories.isNotEmpty()) {
+                item(key = "memory_active_badge") {
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.3f)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .clickable { onOpenMemoryManager() }
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Psychology,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp),
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                text = "🧠 ${lastUsedMemories.size} persistent memories retrieved for this context",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                    }
+                }
             }
 
-            MessageBubbleItem(
-                message = message,
-                isGenerating = isGenerating,
-                isSpeaking = isSpeaking,
-                suggestions = suggestions,
-                onSpeak = onSpeak,
-                onStopSpeaking = onStopSpeaking,
-                onEditMessage = { onEditMessage(message) },
-                onRegenerate = onRegenerate,
-                onSelectSuggestion = onSelectSuggestion
-            )
+            items(messages, key = { it.id }) { message ->
+                val isLastMessage = message.id == messages.lastOrNull()?.id
+                val suggestions = if (isLastMessage && !message.isUser && !message.isStreaming && !isGenerating) {
+                    remember(message.text) { getFollowUpSuggestions(message.text) }
+                } else {
+                    emptyList()
+                }
+
+                MessageBubbleItem(
+                    message = message,
+                    isGenerating = isGenerating,
+                    isSpeaking = isSpeaking,
+                    suggestions = suggestions,
+                    onSpeak = onSpeak,
+                    onStopSpeaking = onStopSpeaking,
+                    onEditMessage = { onEditMessage(message) },
+                    onRegenerate = onRegenerate,
+                    onSelectSuggestion = onSelectSuggestion
+                )
+            }
+        }
+
+        // Subtle floating "Jump to latest" button when scrolled upward during or after generation
+        AnimatedVisibility(
+            visible = userScrolledAway && messages.isNotEmpty(),
+            enter = fadeIn() + slideInVertically { it / 2 },
+            exit = fadeOut() + slideOutVertically { it / 2 },
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 12.dp)
+        ) {
+            Surface(
+                shape = RoundedCornerShape(20.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
+                shadowElevation = 6.dp,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(20.dp))
+                    .clickable {
+                        userScrolledAway = false
+                        scope.launch {
+                            listState.animateScrollToItem(messages.lastIndex)
+                        }
+                    }
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp)
+                ) {
+                    if (isGenerating) {
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .background(MaterialTheme.colorScheme.primary, CircleShape)
+                        )
+                        Spacer(Modifier.width(6.dp))
+                    }
+                    Text(
+                        text = if (isGenerating) "Generating… Jump to latest" else "Jump to latest",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Icon(
+                        imageVector = Icons.Default.KeyboardArrowDown,
+                        contentDescription = "Scroll to bottom",
+                        modifier = Modifier.size(16.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
         }
     }
 }

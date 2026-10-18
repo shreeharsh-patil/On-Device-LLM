@@ -8,6 +8,8 @@ data class GenerationChunk(
     val text: String,
     val isComplete: Boolean = false,
     val metrics: BenchmarkMetrics? = null,
+    val isDelta: Boolean = false,
+    val generationId: String = ""
 )
 
 data class EngineCapabilities(
@@ -33,6 +35,7 @@ interface InferenceEngine {
         config: GenerationConfig = GenerationConfig()
     ): Flow<GenerationChunk>
     fun cancelGeneration()
+    fun resetConversation() {}
     fun getCapabilities(): EngineCapabilities
     fun getBenchmarkMetrics(): BenchmarkMetrics?
 }

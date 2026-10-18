@@ -84,8 +84,10 @@ class LlamaCppInferenceEngine(private val context: Context) : InferenceEngine {
         _isCancelled.set(false)
     }
 
-    // Persistent buffer reused across calls; always reset at start of generation.
-    private val tokenBuffer = ByteArrayOutputStream(4096)
+    override fun resetConversation() {
+        // llama.cpp kv cache is cleared at each prompt submission; reset any ongoing flag
+        _isCancelled.set(false)
+    }
 
     override fun sendMessage(
         prompt: String,
@@ -99,13 +101,16 @@ class LlamaCppInferenceEngine(private val context: Context) : InferenceEngine {
         val startMs = System.currentTimeMillis()
         var firstTokenMs: Long? = null
         var chunkCount = 0
-        // Reset buffer before each new generation to prevent stale token data bleeding through
-        tokenBuffer.reset()
-        val buffer = tokenBuffer
+        // Fresh local buffer allocated per request to eliminate cross-request concurrency contamination
+        val buffer = ByteArrayOutputStream(4096)
         val backendLabel = "llama.cpp • CPU (${config.threadCount} threads)"
 
-        // Format prompt using Dolphin / Qwen ChatML standard template
-        val formattedPrompt = buildChatMlPrompt(config.systemPrompt, prompt)
+        // If prompt is already structured with ChatML tags (from PromptContextBuilder), use directly
+        val formattedPrompt = if (prompt.contains("<|im_start|>")) {
+            prompt
+        } else {
+            buildChatMlPrompt(config.systemPrompt, prompt)
+        }
 
         var lastEmitMs = 0L
         try {
@@ -135,8 +140,14 @@ class LlamaCppInferenceEngine(private val context: Context) : InferenceEngine {
                             backend = backendLabel
                         )
 
-                        val textPreview = buffer.toString("UTF-8")
-                        trySend(GenerationChunk(text = textPreview, isComplete = false, metrics = liveMetrics))
+                        val rawText = buffer.toString("UTF-8")
+                        val cleanText = sanitizeResponseText(rawText)
+                        trySend(GenerationChunk(
+                            text = cleanText,
+                            isComplete = false,
+                            metrics = liveMetrics,
+                            generationId = config.generationId
+                        ))
                     }
                     true
                 }
@@ -157,7 +168,13 @@ class LlamaCppInferenceEngine(private val context: Context) : InferenceEngine {
             )
 
             lastBenchmark = finalMetrics
-            trySend(GenerationChunk(text = buffer.toString("UTF-8"), isComplete = true, metrics = finalMetrics))
+            val cleanFinal = sanitizeResponseText(buffer.toString("UTF-8"))
+            trySend(GenerationChunk(
+                text = cleanFinal,
+                isComplete = true,
+                metrics = finalMetrics,
+                generationId = config.generationId
+            ))
 
         } catch (e: CancellationException) {
             val totalMs = System.currentTimeMillis() - startMs
@@ -168,11 +185,24 @@ class LlamaCppInferenceEngine(private val context: Context) : InferenceEngine {
                 totalDurationMs = totalMs,
                 backend = backendLabel
             )
-            trySend(GenerationChunk(text = buffer.toString("UTF-8"), isComplete = true, metrics = cancelledMetrics))
+            val cleanCancelled = sanitizeResponseText(buffer.toString("UTF-8"))
+            trySend(GenerationChunk(
+                text = cleanCancelled,
+                isComplete = true,
+                metrics = cancelledMetrics,
+                generationId = config.generationId
+            ))
         } finally {
             _isGenerating.set(false)
         }
     }.flowOn(Dispatchers.IO)
+
+    private fun sanitizeResponseText(raw: String): String {
+        return raw.replace("<|im_end|>", "")
+            .replace("<|endoftext|>", "")
+            .replace("<|im_start|>", "")
+            .trimEnd()
+    }
 
     override fun cancelGeneration() {
         if (_isGenerating.get()) {

@@ -70,7 +70,7 @@ jint native_generate(JNIEnv* env, jobject, jlong handle, jstring prompt, jint ma
     env->ReleaseStringUTFChars(prompt, input);
 
     const int n_ctx = (int) llama_n_ctx(s->context);
-    const int max_output = std::clamp((int) max_new_tokens, 1, 1024);
+    const int max_output = std::clamp((int) max_new_tokens, 1, 2048);
     // Leave space for new tokens in context window
     const int capacity = n_ctx - max_output - 8;
     if (capacity <= 0) { throw_java(env, "Context window too small"); return -1; }
@@ -99,11 +99,17 @@ jint native_generate(JNIEnv* env, jobject, jlong handle, jstring prompt, jint ma
     }
 
     llama_sampler* sampler = llama_sampler_chain_init(llama_sampler_chain_default_params());
+    // Repetition penalty: penalize last 64 tokens with 1.15x factor to prevent infinite repeating loops
+    llama_sampler_chain_add(sampler, llama_sampler_init_penalties(64, 1.15f, 0.05f, 0.05f));
     llama_sampler_chain_add(sampler, llama_sampler_init_top_p(0.9f, 1));
     llama_sampler_chain_add(sampler, llama_sampler_init_temp(0.7f));
     llama_sampler_chain_add(sampler, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
 
     int generated = 0;
+    std::vector<llama_token> history_tokens;
+    history_tokens.reserve(max_output);
+    std::string accumulated_recent;
+
     for (; generated < max_output; ++generated) {
         llama_token token = llama_sampler_sample(sampler, s->context, -1);
         llama_sampler_accept(sampler, token);
@@ -118,6 +124,44 @@ jint native_generate(JNIEnv* env, jobject, jlong handle, jstring prompt, jint ma
             size = llama_token_to_piece(s->model, token, extra.data(), (int) extra.size(), 0, false);
             piece = extra.data();
         }
+
+        // Stop sequence check: if special tokens like <|im_end|>, <|endoftext|>, or <|im_start|> appear, stop immediately
+        if (size > 0) {
+            std::string piece_str(piece, size);
+            accumulated_recent += piece_str;
+            if (accumulated_recent.size() > 64) {
+                accumulated_recent.erase(0, accumulated_recent.size() - 64);
+            }
+            if (accumulated_recent.find("<|im_end|>") != std::string::npos ||
+                accumulated_recent.find("<|endoftext|>") != std::string::npos ||
+                accumulated_recent.find("<|im_start|>") != std::string::npos) {
+                break;
+            }
+        }
+
+        // Runaway repetition check: detect if same token repeats 5+ times or identical 8-token cycle repeats 3+ times
+        history_tokens.push_back(token);
+        int h_size = (int) history_tokens.size();
+        if (h_size >= 5 &&
+            history_tokens[h_size - 1] == history_tokens[h_size - 2] &&
+            history_tokens[h_size - 2] == history_tokens[h_size - 3] &&
+            history_tokens[h_size - 3] == history_tokens[h_size - 4] &&
+            history_tokens[h_size - 4] == history_tokens[h_size - 5]) {
+            break; // Identical single token repeated 5 times in a row
+        }
+        if (h_size >= 32) {
+            // Check for 8-token loop
+            bool is_loop = true;
+            for (int k = 0; k < 8; ++k) {
+                if (history_tokens[h_size - 1 - k] != history_tokens[h_size - 9 - k] ||
+                    history_tokens[h_size - 9 - k] != history_tokens[h_size - 17 - k]) {
+                    is_loop = false;
+                    break;
+                }
+            }
+            if (is_loop) break;
+        }
+
         if (size > 0) {
             jbyteArray bytes = env->NewByteArray(size);
             if (!bytes) break;

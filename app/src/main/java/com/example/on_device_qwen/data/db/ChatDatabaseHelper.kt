@@ -50,23 +50,47 @@ class ChatDatabaseHelper(context: Context) : SQLiteOpenHelper(
         )
 
         db.execSQL("CREATE INDEX idx_messages_conv ON $TABLE_MESSAGES($COL_MSG_CONV_ID, $COL_MSG_TIMESTAMP)")
+
+        createMemoryTables(db)
+    }
+
+    private fun createMemoryTables(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS $TABLE_MEMORIES (
+                $COL_MEM_ID TEXT PRIMARY KEY,
+                $COL_MEM_CATEGORY TEXT NOT NULL,
+                $COL_MEM_CONTENT TEXT NOT NULL,
+                $COL_MEM_SOURCE_CONV_ID TEXT,
+                $COL_MEM_CREATED_AT INTEGER NOT NULL,
+                $COL_MEM_UPDATED_AT INTEGER NOT NULL,
+                $COL_MEM_CONFIDENCE REAL DEFAULT 1.0,
+                $COL_MEM_KEYWORDS TEXT DEFAULT '',
+                $COL_MEM_PINNED INTEGER DEFAULT 0
+            )
+            """.trimIndent()
+        )
+
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_memories_cat ON $TABLE_MEMORIES($COL_MEM_CATEGORY)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_memories_updated ON $TABLE_MEMORIES($COL_MEM_UPDATED_AT DESC)")
+
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS $TABLE_SUMMARIES (
+                $COL_SUM_CONV_ID TEXT PRIMARY KEY,
+                $COL_SUM_TEXT TEXT NOT NULL,
+                $COL_SUM_LAST_MSG_TIME INTEGER NOT NULL,
+                $COL_SUM_UPDATED_AT INTEGER NOT NULL,
+                FOREIGN KEY ($COL_SUM_CONV_ID) REFERENCES $TABLE_CONVERSATIONS($COL_CONV_ID) ON DELETE CASCADE
+            )
+            """.trimIndent()
+        )
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        // BUG-020 FIX: Never use DROP TABLE in onUpgrade — it destroys all user data.
-        // Use additive ALTER TABLE migrations for each version step.
-        // Current version is 1. Future migrations should follow this pattern:
-        //
-        //   if (oldVersion < 2) {
-        //       db.execSQL("ALTER TABLE $TABLE_MESSAGES ADD COLUMN new_column TEXT DEFAULT ''")
-        //   }
-        //   if (oldVersion < 3) { ... }
-        //
-        // For any schema changes that truly cannot be done with ALTER TABLE (e.g., column
-        // rename / type change), copy data to a temp table, recreate, and copy back.
-        //
-        // If migration is impossible (e.g., completely incompatible schema), preserve data
-        // integrity by exporting before dropping, never silently destroying user history.
+        if (oldVersion < 2) {
+            createMemoryTables(db)
+        }
     }
 
     override fun onConfigure(db: SQLiteDatabase) {
@@ -76,7 +100,7 @@ class ChatDatabaseHelper(context: Context) : SQLiteOpenHelper(
 
     companion object {
         const val DATABASE_NAME = "qwen_chat.db"
-        const val DATABASE_VERSION = 1
+        const val DATABASE_VERSION = 2
 
         const val TABLE_CONVERSATIONS = "conversations"
         const val COL_CONV_ID = "id"
@@ -101,5 +125,22 @@ class ChatDatabaseHelper(context: Context) : SQLiteOpenHelper(
         const val COL_MSG_DURATION_MS = "duration_ms"
         const val COL_MSG_BACKEND = "backend"
         const val COL_MSG_IS_ERROR = "is_error"
+
+        const val TABLE_MEMORIES = "memories"
+        const val COL_MEM_ID = "id"
+        const val COL_MEM_CATEGORY = "category"
+        const val COL_MEM_CONTENT = "content"
+        const val COL_MEM_SOURCE_CONV_ID = "source_conversation_id"
+        const val COL_MEM_CREATED_AT = "created_at"
+        const val COL_MEM_UPDATED_AT = "updated_at"
+        const val COL_MEM_CONFIDENCE = "confidence"
+        const val COL_MEM_KEYWORDS = "keywords"
+        const val COL_MEM_PINNED = "is_pinned"
+
+        const val TABLE_SUMMARIES = "conversation_summaries"
+        const val COL_SUM_CONV_ID = "conversation_id"
+        const val COL_SUM_TEXT = "summary_text"
+        const val COL_SUM_LAST_MSG_TIME = "last_message_timestamp"
+        const val COL_SUM_UPDATED_AT = "updated_at"
     }
 }

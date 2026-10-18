@@ -10,7 +10,7 @@ import com.example.on_device_qwen.model.ConversationSession
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-class ConversationRepository(context: Context) {
+class ConversationRepository(context: Context) : com.example.on_device_qwen.model.IMemoryRepository {
 
     private val dbHelper = ChatDatabaseHelper(context.applicationContext)
 
@@ -106,6 +106,11 @@ class ConversationRepository(context: Context) {
             db.delete(
                 ChatDatabaseHelper.TABLE_MESSAGES,
                 "${ChatDatabaseHelper.COL_MSG_CONV_ID} = ?",
+                arrayOf(id)
+            )
+            db.delete(
+                ChatDatabaseHelper.TABLE_SUMMARIES,
+                "${ChatDatabaseHelper.COL_SUM_CONV_ID} = ?",
                 arrayOf(id)
             )
             db.delete(
@@ -212,12 +217,274 @@ class ConversationRepository(context: Context) {
         )
     }
 
+    suspend fun deleteMessage(messageId: Long) = withContext(Dispatchers.IO) {
+        val db = dbHelper.writableDatabase
+        db.delete(
+            ChatDatabaseHelper.TABLE_MESSAGES,
+            "${ChatDatabaseHelper.COL_MSG_ID} = ?",
+            arrayOf(messageId.toString())
+        )
+    }
+
+    suspend fun deleteLastAssistantMessage(conversationId: String): Long? = withContext(Dispatchers.IO) {
+        val db = dbHelper.writableDatabase
+        val cursor = db.rawQuery(
+            """
+            SELECT ${ChatDatabaseHelper.COL_MSG_ID} FROM ${ChatDatabaseHelper.TABLE_MESSAGES}
+            WHERE ${ChatDatabaseHelper.COL_MSG_CONV_ID} = ? AND ${ChatDatabaseHelper.COL_MSG_IS_USER} = 0
+            ORDER BY ${ChatDatabaseHelper.COL_MSG_TIMESTAMP} DESC LIMIT 1
+            """.trimIndent(),
+            arrayOf(conversationId)
+        )
+        var lastId: Long? = null
+        cursor.use {
+            if (it.moveToFirst()) {
+                lastId = it.getLong(0)
+            }
+        }
+        lastId?.let { id ->
+            db.delete(
+                ChatDatabaseHelper.TABLE_MESSAGES,
+                "${ChatDatabaseHelper.COL_MSG_ID} = ?",
+                arrayOf(id.toString())
+            )
+        }
+        lastId
+    }
+
     suspend fun deleteMessagesAfter(conversationId: String, timestamp: Long) = withContext(Dispatchers.IO) {
         val db = dbHelper.writableDatabase
         db.delete(
             ChatDatabaseHelper.TABLE_MESSAGES,
             "${ChatDatabaseHelper.COL_MSG_CONV_ID} = ? AND ${ChatDatabaseHelper.COL_MSG_TIMESTAMP} >= ?",
             arrayOf(conversationId, timestamp.toString())
+        )
+    }
+
+    // ── Persistent Cross-Chat Memory ──────────────────────────────────────────
+
+    override suspend fun saveMemory(item: com.example.on_device_qwen.model.MemoryItem) = withContext(Dispatchers.IO) {
+        val db = dbHelper.writableDatabase
+        val values = ContentValues().apply {
+            put(ChatDatabaseHelper.COL_MEM_ID, item.id)
+            put(ChatDatabaseHelper.COL_MEM_CATEGORY, item.category.name)
+            put(ChatDatabaseHelper.COL_MEM_CONTENT, item.content)
+            put(ChatDatabaseHelper.COL_MEM_SOURCE_CONV_ID, item.sourceConversationId)
+            put(ChatDatabaseHelper.COL_MEM_CREATED_AT, item.createdAt)
+            put(ChatDatabaseHelper.COL_MEM_UPDATED_AT, item.updatedAt)
+            put(ChatDatabaseHelper.COL_MEM_CONFIDENCE, item.confidence)
+            put(ChatDatabaseHelper.COL_MEM_KEYWORDS, item.keywords)
+            put(ChatDatabaseHelper.COL_MEM_PINNED, if (item.isPinned) 1 else 0)
+        }
+        db.insertWithOnConflict(
+            ChatDatabaseHelper.TABLE_MEMORIES,
+            null,
+            values,
+            android.database.sqlite.SQLiteDatabase.CONFLICT_REPLACE
+        )
+    }
+
+    override suspend fun updateMemory(id: String, newContent: String, category: com.example.on_device_qwen.model.MemoryCategory?) = withContext(Dispatchers.IO) {
+        val db = dbHelper.writableDatabase
+        val values = ContentValues().apply {
+            put(ChatDatabaseHelper.COL_MEM_CONTENT, newContent)
+            put(ChatDatabaseHelper.COL_MEM_UPDATED_AT, System.currentTimeMillis())
+            category?.let { put(ChatDatabaseHelper.COL_MEM_CATEGORY, it.name) }
+        }
+        db.update(
+            ChatDatabaseHelper.TABLE_MEMORIES,
+            values,
+            "${ChatDatabaseHelper.COL_MEM_ID} = ?",
+            arrayOf(id)
+        )
+    }
+
+    override suspend fun deleteMemory(id: String) = withContext(Dispatchers.IO) {
+        val db = dbHelper.writableDatabase
+        db.delete(
+            ChatDatabaseHelper.TABLE_MEMORIES,
+            "${ChatDatabaseHelper.COL_MEM_ID} = ?",
+            arrayOf(id)
+        )
+    }
+
+    override suspend fun clearAllMemories() = withContext(Dispatchers.IO) {
+        val db = dbHelper.writableDatabase
+        db.delete(ChatDatabaseHelper.TABLE_MEMORIES, null, null)
+    }
+
+    override suspend fun getAllMemories(): List<com.example.on_device_qwen.model.MemoryItem> = withContext(Dispatchers.IO) {
+        val list = mutableListOf<com.example.on_device_qwen.model.MemoryItem>()
+        val db = dbHelper.readableDatabase
+        val cursor = db.query(
+            ChatDatabaseHelper.TABLE_MEMORIES,
+            null,
+            null,
+            null,
+            null,
+            null,
+            "${ChatDatabaseHelper.COL_MEM_PINNED} DESC, ${ChatDatabaseHelper.COL_MEM_UPDATED_AT} DESC"
+        )
+        cursor.use {
+            while (it.moveToNext()) {
+                list.add(cursorToMemory(it))
+            }
+        }
+        list
+    }
+
+    suspend fun searchMemories(
+        query: String,
+        category: com.example.on_device_qwen.model.MemoryCategory? = null
+    ): List<com.example.on_device_qwen.model.MemoryItem> = withContext(Dispatchers.IO) {
+        val db = dbHelper.readableDatabase
+        val list = mutableListOf<com.example.on_device_qwen.model.MemoryItem>()
+        val escaped = query.trim().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        val pattern = "%$escaped%"
+
+        val selection = if (category != null) {
+            "(${ChatDatabaseHelper.COL_MEM_CONTENT} LIKE ? ESCAPE '\\' OR ${ChatDatabaseHelper.COL_MEM_KEYWORDS} LIKE ? ESCAPE '\\') AND ${ChatDatabaseHelper.COL_MEM_CATEGORY} = ?"
+        } else {
+            "${ChatDatabaseHelper.COL_MEM_CONTENT} LIKE ? ESCAPE '\\' OR ${ChatDatabaseHelper.COL_MEM_KEYWORDS} LIKE ? ESCAPE '\\'"
+        }
+        val selectionArgs = if (category != null) {
+            arrayOf(pattern, pattern, category.name)
+        } else {
+            arrayOf(pattern, pattern)
+        }
+
+        val cursor = db.query(
+            ChatDatabaseHelper.TABLE_MEMORIES,
+            null,
+            selection,
+            selectionArgs,
+            null,
+            null,
+            "${ChatDatabaseHelper.COL_MEM_PINNED} DESC, ${ChatDatabaseHelper.COL_MEM_UPDATED_AT} DESC"
+        )
+        cursor.use {
+            while (it.moveToNext()) {
+                list.add(cursorToMemory(it))
+            }
+        }
+        list
+    }
+
+    /**
+     * Scores and ranks memories based on keyword overlap with current query, recency, and pinning.
+     */
+    override suspend fun findRelevantMemories(query: String, limit: Int): List<com.example.on_device_qwen.model.MemoryItem> = withContext(Dispatchers.IO) {
+        val all = getAllMemories()
+        if (all.isEmpty()) return@withContext emptyList()
+
+        val stopWords = setOf("the", "is", "at", "which", "on", "a", "an", "and", "or", "to", "in", "for", "with", "about", "what", "how", "why", "can", "you", "please", "this", "that")
+        val terms = query.lowercase()
+            .split(Regex("[^a-zA-Z0-9_]+"))
+            .filter { it.length > 2 && it !in stopWords }
+
+        if (terms.isEmpty()) {
+            return@withContext all.filter { it.isPinned || it.category == com.example.on_device_qwen.model.MemoryCategory.USER }.take(limit)
+        }
+
+        val now = System.currentTimeMillis()
+        val scored = all.map { memory ->
+            val contentLower = memory.content.lowercase()
+            val keywordsLower = memory.keywords.lowercase()
+
+            var score = 0.0
+            for (term in terms) {
+                if (contentLower.contains(term)) score += 3.0
+                if (keywordsLower.contains(term)) score += 4.0
+            }
+
+            // Always consider pinned memories
+            if (memory.isPinned) score += 2.0
+
+            // User preferences get baseline consideration
+            if (memory.category == com.example.on_device_qwen.model.MemoryCategory.USER) score += 1.0
+
+            // Recency boost (within 7 days)
+            val ageDays = (now - memory.updatedAt).toDouble() / (1000 * 60 * 60 * 24)
+            if (ageDays < 7.0) {
+                score += (7.0 - ageDays) * 0.2
+            }
+
+            memory to score
+        }
+
+        scored.filter { it.second > 1.5 }
+            .sortedByDescending { it.second }
+            .take(limit)
+            .map { it.first }
+    }
+
+    // ── Conversation Summaries ────────────────────────────────────────────────
+
+    override suspend fun saveConversationSummary(summary: com.example.on_device_qwen.model.ConversationSummary) = withContext(Dispatchers.IO) {
+        val db = dbHelper.writableDatabase
+        val values = ContentValues().apply {
+            put(ChatDatabaseHelper.COL_SUM_CONV_ID, summary.conversationId)
+            put(ChatDatabaseHelper.COL_SUM_TEXT, summary.summaryText)
+            put(ChatDatabaseHelper.COL_SUM_LAST_MSG_TIME, summary.lastMessageTimestamp)
+            put(ChatDatabaseHelper.COL_SUM_UPDATED_AT, summary.updatedAt)
+        }
+        db.insertWithOnConflict(
+            ChatDatabaseHelper.TABLE_SUMMARIES,
+            null,
+            values,
+            android.database.sqlite.SQLiteDatabase.CONFLICT_REPLACE
+        )
+    }
+
+    override suspend fun getConversationSummary(conversationId: String): com.example.on_device_qwen.model.ConversationSummary? = withContext(Dispatchers.IO) {
+        val db = dbHelper.readableDatabase
+        val cursor = db.query(
+            ChatDatabaseHelper.TABLE_SUMMARIES,
+            null,
+            "${ChatDatabaseHelper.COL_SUM_CONV_ID} = ?",
+            arrayOf(conversationId),
+            null,
+            null,
+            null
+        )
+        cursor.use {
+            if (it.moveToFirst()) {
+                com.example.on_device_qwen.model.ConversationSummary(
+                    conversationId = it.getString(it.getColumnIndexOrThrow(ChatDatabaseHelper.COL_SUM_CONV_ID)),
+                    summaryText = it.getString(it.getColumnIndexOrThrow(ChatDatabaseHelper.COL_SUM_TEXT)),
+                    lastMessageTimestamp = it.getLong(it.getColumnIndexOrThrow(ChatDatabaseHelper.COL_SUM_LAST_MSG_TIME)),
+                    updatedAt = it.getLong(it.getColumnIndexOrThrow(ChatDatabaseHelper.COL_SUM_UPDATED_AT))
+                )
+            } else null
+        }
+    }
+
+    override suspend fun deleteConversationSummary(conversationId: String) = withContext(Dispatchers.IO) {
+        val db = dbHelper.writableDatabase
+        db.delete(
+            ChatDatabaseHelper.TABLE_SUMMARIES,
+            "${ChatDatabaseHelper.COL_SUM_CONV_ID} = ?",
+            arrayOf(conversationId)
+        )
+    }
+
+    private fun cursorToMemory(cursor: Cursor): com.example.on_device_qwen.model.MemoryItem {
+        val catName = cursor.getString(cursor.getColumnIndexOrThrow(ChatDatabaseHelper.COL_MEM_CATEGORY))
+        val category = try {
+            com.example.on_device_qwen.model.MemoryCategory.valueOf(catName)
+        } catch (_: Exception) {
+            com.example.on_device_qwen.model.MemoryCategory.EPISODIC
+        }
+        return com.example.on_device_qwen.model.MemoryItem(
+            id = cursor.getString(cursor.getColumnIndexOrThrow(ChatDatabaseHelper.COL_MEM_ID)),
+            category = category,
+            content = cursor.getString(cursor.getColumnIndexOrThrow(ChatDatabaseHelper.COL_MEM_CONTENT)),
+            sourceConversationId = cursor.getString(cursor.getColumnIndexOrThrow(ChatDatabaseHelper.COL_MEM_SOURCE_CONV_ID)),
+            createdAt = cursor.getLong(cursor.getColumnIndexOrThrow(ChatDatabaseHelper.COL_MEM_CREATED_AT)),
+            updatedAt = cursor.getLong(cursor.getColumnIndexOrThrow(ChatDatabaseHelper.COL_MEM_UPDATED_AT)),
+            confidence = cursor.getFloat(cursor.getColumnIndexOrThrow(ChatDatabaseHelper.COL_MEM_CONFIDENCE)),
+            keywords = cursor.getString(cursor.getColumnIndexOrThrow(ChatDatabaseHelper.COL_MEM_KEYWORDS)) ?: "",
+            isPinned = cursor.getInt(cursor.getColumnIndexOrThrow(ChatDatabaseHelper.COL_MEM_PINNED)) == 1
         )
     }
 

@@ -6,8 +6,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -49,6 +48,9 @@ fun SettingsDialog(
     isCharging: Boolean,
     availRamMb: Long,
     totalRamMb: Long,
+    isMemoryEnabled: Boolean = true,
+    onToggleMemory: (Boolean) -> Unit = {},
+    onManageMemories: () -> Unit = {},
     onDismiss: () -> Unit
 ) {
     Dialog(
@@ -201,7 +203,47 @@ fun SettingsDialog(
                         )
                     }
 
-                    // 5. System Prompt
+                    // 5. Persistent Cross-Chat Memory
+                    SettingsSection(title = "Persistent Memory") {
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text("Cross-Chat Memory", fontWeight = FontWeight.SemiBold)
+                                        Text(
+                                            "Remember key user & project facts across sessions",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                    Switch(
+                                        checked = isMemoryEnabled,
+                                        onCheckedChange = onToggleMemory
+                                    )
+                                }
+
+                                OutlinedButton(
+                                    onClick = onManageMemories,
+                                    modifier = Modifier.fillMaxWidth(),
+                                    shape = RoundedCornerShape(10.dp)
+                                ) {
+                                    Icon(Icons.Default.Psychology, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("Inspect & Manage Stored Memories")
+                                }
+                            }
+                        }
+                    }
+
+                    // 6. System Prompt
                     SettingsSection(title = "Custom System Prompt") {
                         OutlinedTextField(
                             value = systemPrompt,

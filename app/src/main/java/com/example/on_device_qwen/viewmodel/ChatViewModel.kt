@@ -43,6 +43,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = ConversationRepository(application)
     private val modelRepository = ModelRepository(application)
     private val prefs = AppPreferences(application)
+    private val memoryManager = com.example.on_device_qwen.domain.memory.MemoryManager(repository, prefs)
     private val engineFactory = InferenceEngineFactory(application)
     private val thermalManager = ThermalPerformanceManager(application)
     private val memoryMonitor = MemoryMonitor(application)
@@ -50,8 +51,19 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     private var activeEngine: InferenceEngine? = null
     private var generationJob: Job? = null
+    private var activeGenerationId: String? = null
 
     val isSpeaking: StateFlow<Boolean> = ttsManager.isSpeaking
+
+    // ── Memory State Flows ─────────────────────────────────────────────────────
+    private val _persistentMemoryEnabled = MutableStateFlow(prefs.persistentMemoryEnabled)
+    val persistentMemoryEnabled: StateFlow<Boolean> = _persistentMemoryEnabled.asStateFlow()
+
+    private val _allMemories = MutableStateFlow<List<com.example.on_device_qwen.model.MemoryItem>>(emptyList())
+    val allMemories: StateFlow<List<com.example.on_device_qwen.model.MemoryItem>> = _allMemories.asStateFlow()
+
+    private val _lastUsedMemories = MutableStateFlow<List<com.example.on_device_qwen.model.MemoryItem>>(emptyList())
+    val lastUsedMemories: StateFlow<List<com.example.on_device_qwen.model.MemoryItem>> = _lastUsedMemories.asStateFlow()
 
     // ── State Flows ───────────────────────────────────────────────────────────
     private val _engineState = MutableStateFlow<EngineState>(EngineState.Idle)
@@ -126,6 +138,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         loadConversations()
+        loadMemories()
         initializeEngine()
     }
 
@@ -325,17 +338,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Send user message and stream token chunks to UI with real-time telemetry.
+     * Send user message and stream token chunks to UI with real-time telemetry,
+     * conversation context, and persistent cross-chat memory retrieval.
      */
-    fun sendMessage(userText: String, imageUri: Uri? = null) {
+    fun sendMessage(userText: String, imageUri: Uri? = null, isRegeneration: Boolean = false) {
         val trimmed = userText.trim()
         if ((trimmed.isEmpty() && imageUri == null) || _isGenerating.value) return
         val engine = activeEngine ?: return
         if (!engine.isLoaded) return
 
-        // BUG-006 FIX: Run all setup synchronously in viewModelScope so generationJob
-        // is launched directly from viewModelScope (not nested inside another coroutine).
-        // This ensures generationJob?.cancel() in stopGeneration() is always reliable.
         viewModelScope.launch {
             // Ensure an active conversation session exists in SQLite
             var currentSession = _activeConversation.value
@@ -348,32 +359,43 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 repository.saveConversation(newSession)
                 _activeConversation.value = newSession
                 currentSession = newSession
-                // BUG-019 FIX: Update local list directly instead of full DB re-fetch
                 _conversations.value = listOf(newSession) + _conversations.value
             }
 
-            // BUG-021 FIX: File I/O (contentResolver.openInputStream + copyTo) must run
-            // on Dispatchers.IO, not the main dispatcher used by viewModelScope.launch.
+            val session = currentSession
+            val promptText = if (trimmed.isNotEmpty()) trimmed else "Describe this image in detail."
             val localImagePath = imageUri?.let {
                 withContext(Dispatchers.IO) { saveUriToCache(it)?.absolutePath }
             }
-            val promptText = if (trimmed.isNotEmpty()) trimmed else "Describe this image in detail."
 
-            // Add user message to UI and database
-            val userMsg = ChatMessage(
-                conversationId = currentSession.id,
-                text = promptText,
-                imagePath = localImagePath,
-                isUser = true
-            )
-            _messages.value = _messages.value + userMsg
-            repository.saveMessage(userMsg)
+            if (isRegeneration) {
+                // BUG FIX: On regeneration, delete previous assistant message from DB and UI.
+                // Do NOT insert a duplicate user message!
+                repository.deleteLastAssistantMessage(session.id)
+                val lastBot = _messages.value.lastOrNull { !it.isUser }
+                if (lastBot != null) {
+                    _messages.value = _messages.value.filterNot { it.id == lastBot.id }
+                }
+            } else {
+                // Add new user message to UI and database
+                val userMsg = ChatMessage(
+                    conversationId = session.id,
+                    text = promptText,
+                    imagePath = localImagePath,
+                    isUser = true
+                )
+                _messages.value = _messages.value + userMsg
+                repository.saveMessage(userMsg)
+            }
 
-            // Placeholder streaming assistant message
+            // Assign unique generation ID to guarantee single authoritative stream reader
+            val generationId = UUID.randomUUID().toString()
+            activeGenerationId = generationId
+
             val botMsgId = System.nanoTime()
             val initialBotMsg = ChatMessage(
                 id = botMsgId,
-                conversationId = currentSession.id,
+                conversationId = session.id,
                 text = "",
                 isUser = false,
                 isStreaming = true,
@@ -382,30 +404,48 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             _messages.value = _messages.value + initialBotMsg
             _isGenerating.value = true
 
+            // Retrieve relevant cross-chat persistent memories
+            val memoryContext = memoryManager.retrieveMemoryContext(promptText, session.id)
+            _lastUsedMemories.value = memoryContext.memories
+
             val threads = thermalManager.getAdaptiveThreadCount(_performanceMode.value, _threadCount.value)
             val config = GenerationConfig(
                 temperature = _temperature.value,
                 topP = _topP.value,
+                repetitionPenalty = prefs.repetitionPenalty,
                 maxOutputTokens = _maxTokens.value,
                 systemPrompt = _systemPrompt.value,
                 threadCount = threads,
-                backend = _currentBackend.value
+                backend = _currentBackend.value,
+                generationId = generationId
             )
 
-            // BUG-006 FIX: generationJob is launched directly from viewModelScope so
-            // stopGeneration()'s generationJob?.cancel() always targets the right Job.
-            val session = currentSession
+            // Build bounded, multi-turn conversation context
+            val historyForPrompt = _messages.value.filter { it.id != botMsgId }
+            val formattedPrompt = com.example.on_device_qwen.domain.context.PromptContextBuilder.buildChatMl(
+                historyMessages = historyForPrompt,
+                latestUserPrompt = promptText,
+                memoryContext = memoryContext,
+                config = config
+            )
+
             generationJob = viewModelScope.launch {
                 try {
                     var lastUiUpdateMs = 0L
-                    engine.sendMessage(promptText, localImagePath, config).collect { chunk ->
+                    engine.sendMessage(formattedPrompt, localImagePath, config).collect { chunk ->
+                        // Discard stale chunks from prior or cancelled generations
+                        if (activeGenerationId != generationId || _activeConversation.value?.id != session.id) {
+                            return@collect
+                        }
+
                         val now = android.os.SystemClock.elapsedRealtime()
                         val isComplete = chunk.isComplete
-                        if (isComplete || now - lastUiUpdateMs >= 40L) {
+                        if (isComplete || now - lastUiUpdateMs >= 35L) {
                             lastUiUpdateMs = now
                             val parsed = parseReasoningTags(chunk.text)
 
                             withContext(Dispatchers.Main) {
+                                if (activeGenerationId != generationId) return@withContext
                                 _messages.value = _messages.value.map { msg ->
                                     if (msg.id == botMsgId) {
                                         msg.copy(
@@ -423,22 +463,32 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                             val finalMsg = _messages.value.find { it.id == botMsgId }
                             if (finalMsg != null) {
                                 repository.saveMessage(finalMsg.copy(isStreaming = false))
+                                // Asynchronously extract and consolidate persistent facts
+                                viewModelScope.launch(Dispatchers.IO) {
+                                    memoryManager.extractAndConsolidate(session.id, promptText, finalMsg.text)
+                                    loadMemories()
+                                }
                             }
                         }
                     }
                 } catch (e: Exception) {
-                    val errorMsg = ChatMessage(
-                        id = botMsgId,
-                        conversationId = session.id,
-                        text = "⚠️ Error during generation: ${e.localizedMessage ?: e.toString()}",
-                        isUser = false,
-                        isStreaming = false,
-                        isError = true
-                    )
-                    _messages.value = _messages.value.map { if (it.id == botMsgId) errorMsg else it }
-                    repository.saveMessage(errorMsg)
+                    if (activeGenerationId == generationId) {
+                        val errorMsg = ChatMessage(
+                            id = botMsgId,
+                            conversationId = session.id,
+                            text = "⚠️ Error during generation: ${e.localizedMessage ?: e.toString()}",
+                            isUser = false,
+                            isStreaming = false,
+                            isError = true
+                        )
+                        _messages.value = _messages.value.map { if (it.id == botMsgId) errorMsg else it }
+                        repository.saveMessage(errorMsg)
+                    }
                 } finally {
-                    _isGenerating.value = false
+                    if (activeGenerationId == generationId) {
+                        _isGenerating.value = false
+                        activeGenerationId = null
+                    }
                     loadConversations()
                 }
             }
@@ -446,10 +496,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Instantly halts token generation.
+     * Instantly halts token generation and releases native stream readers.
      */
     fun stopGeneration() {
         if (_isGenerating.value) {
+            activeGenerationId = null
             generationJob?.cancel()
             activeEngine?.cancelGeneration()
             _isGenerating.value = false
@@ -462,20 +513,18 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Regenerates the last assistant response.
+     * Regenerates the last assistant response without duplicating the user's prompt.
      */
     fun regenerateLastResponse() {
         if (_isGenerating.value) return
         val currentMsgs = _messages.value
         val lastUserMsg = currentMsgs.lastOrNull { it.isUser } ?: return
 
-        // BUG-007 FIX: Find and remove specifically the last assistant message,
-        // not just the last message (which could be a user message)
-        val lastBotMsg = currentMsgs.lastOrNull { !it.isUser }
-        val updatedMsgs = if (lastBotMsg != null) currentMsgs.filterNot { it.id == lastBotMsg.id } else currentMsgs
-        _messages.value = updatedMsgs
-
-        sendMessage(lastUserMsg.text, lastUserMsg.imagePath?.let { Uri.fromFile(File(it)) })
+        sendMessage(
+            userText = lastUserMsg.text,
+            imageUri = lastUserMsg.imagePath?.let { Uri.fromFile(File(it)) },
+            isRegeneration = true
+        )
     }
 
     /**
@@ -488,21 +537,76 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val targetMsg = _messages.value.find { it.id == messageId } ?: return@launch
             repository.deleteMessagesAfter(currentSession.id, targetMsg.timestamp)
-            _messages.value = repository.getMessages(currentSession.id)
-            sendMessage(newText)
+            _messages.value = repository.getMessages(currentSession.id).filterNot { it.id == messageId }
+            sendMessage(newText, targetMsg.imagePath?.let { Uri.fromFile(File(it)) })
+        }
+    }
+
+    // ── Persistent Memory Operations ──────────────────────────────────────────
+
+    fun loadMemories() {
+        viewModelScope.launch {
+            _allMemories.value = repository.getAllMemories()
+        }
+    }
+
+    fun togglePersistentMemory(enabled: Boolean) {
+        _persistentMemoryEnabled.value = enabled
+        prefs.persistentMemoryEnabled = enabled
+    }
+
+    fun saveMemory(item: com.example.on_device_qwen.model.MemoryItem) {
+        viewModelScope.launch {
+            repository.saveMemory(item)
+            loadMemories()
+        }
+    }
+
+    fun updateMemory(id: String, content: String, category: com.example.on_device_qwen.model.MemoryCategory? = null) {
+        viewModelScope.launch {
+            repository.updateMemory(id, content, category)
+            loadMemories()
+        }
+    }
+
+    fun deleteMemory(id: String) {
+        viewModelScope.launch {
+            repository.deleteMemory(id)
+            loadMemories()
+        }
+    }
+
+    fun clearAllMemories() {
+        viewModelScope.launch {
+            repository.clearAllMemories()
+            loadMemories()
+        }
+    }
+
+    fun searchMemories(query: String) {
+        viewModelScope.launch {
+            if (query.isBlank()) {
+                _allMemories.value = repository.getAllMemories()
+            } else {
+                _allMemories.value = repository.searchMemories(query)
+            }
         }
     }
 
     // ── Conversation Lifecycle ────────────────────────────────────────────────
     fun newChat() {
         if (_isGenerating.value) stopGeneration()
+        activeEngine?.resetConversation()
         _activeConversation.value = null
         _messages.value = emptyList()
+        _lastUsedMemories.value = emptyList()
     }
 
     fun selectConversation(session: ConversationSession) {
         if (_isGenerating.value) stopGeneration()
+        activeEngine?.resetConversation()
         _activeConversation.value = session
+        _lastUsedMemories.value = emptyList()
         viewModelScope.launch {
             _messages.value = repository.getMessages(session.id)
         }

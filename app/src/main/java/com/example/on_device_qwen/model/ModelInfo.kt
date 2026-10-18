@@ -62,11 +62,14 @@ data class ModelDiagnostic(
 data class GenerationConfig(
     val temperature: Float = 0.7f,
     val topP: Float = 0.8f,
+    val repetitionPenalty: Float = 1.15f,
     val maxOutputTokens: Int = 2048,
     val contextLength: Int = 4096,
     val systemPrompt: String = DEFAULT_SYSTEM_PROMPT,
     val threadCount: Int = 4,
     val backend: BackendType = BackendType.CPU,
+    val stopSequences: List<String> = listOf("<|im_end|>", "<|endoftext|>", "<|im_start|>"),
+    val generationId: String = "",
 ) {
     companion object {
         const val DEFAULT_SYSTEM_PROMPT =

@@ -105,7 +105,9 @@ class LlamaCppInferenceEngine(private val context: Context) : InferenceEngine {
         val buffer = ByteArrayOutputStream(4096)
         val backendLabel = "llama.cpp • CPU (${config.threadCount} threads)"
 
-        // If prompt is already structured with ChatML tags (from PromptContextBuilder), use directly
+        // If prompt is already structured with ChatML tags (from PromptContextBuilder), use directly.
+        // The builder guarantees exactly one sanitized system block, so engines must NOT
+        // prepend a second system prompt here — that is what caused duplication bugs.
         val formattedPrompt = if (prompt.contains("<|im_start|>")) {
             prompt
         } else {
@@ -113,10 +115,14 @@ class LlamaCppInferenceEngine(private val context: Context) : InferenceEngine {
         }
 
         var lastEmitMs = 0L
+        val promptTokens = com.example.on_device_qwen.domain.context.PromptContextBuilder.estimateTokens(formattedPrompt)
         try {
             val totalTokens = nativeEngine.generate(
                 prompt = formattedPrompt,
                 maxTokens = config.maxOutputTokens,
+                temperature = config.temperature,
+                topP = config.topP,
+                repetitionPenalty = config.repetitionPenalty,
                 listener = ChunkListener { bytes ->
                     if (_isCancelled.get()) return@ChunkListener false
 
@@ -125,23 +131,25 @@ class LlamaCppInferenceEngine(private val context: Context) : InferenceEngine {
                     chunkCount++
                     buffer.write(bytes)
 
-                    // Throttle String conversions & channel emissions to ~35ms to eliminate GC pressure
-                    if (now - lastEmitMs >= 35L) {
+                    // Throttle String conversions & channel emissions to ~45ms to eliminate GC & UI pressure
+                    if (now - lastEmitMs >= 45L) {
                         lastEmitMs = now
+                        val rawText = buffer.toString("UTF-8")
+                        val cleanText = sanitizeResponseText(rawText)
+                        val currentDecodeTokens = maxOf(chunkCount, com.example.on_device_qwen.domain.context.PromptContextBuilder.estimateTokens(cleanText))
                         val ttft = (currentFirstToken - startMs).coerceAtLeast(0)
                         val decodeDurationSec = (now - currentFirstToken) / 1000.0
-                        val liveTps = if (decodeDurationSec > 0.05) chunkCount / decodeDurationSec else 0.0
+                        val liveTps = if (decodeDurationSec > 0.05) currentDecodeTokens / decodeDurationSec else 0.0
 
                         val liveMetrics = BenchmarkMetrics(
                             ttftMs = ttft,
                             decodeTps = liveTps,
-                            decodeTokens = chunkCount,
+                            prefillTokens = promptTokens,
+                            decodeTokens = currentDecodeTokens,
                             totalDurationMs = now - startMs,
                             backend = backendLabel
                         )
 
-                        val rawText = buffer.toString("UTF-8")
-                        val cleanText = sanitizeResponseText(rawText)
                         trySend(GenerationChunk(
                             text = cleanText,
                             isComplete = false,
@@ -157,18 +165,21 @@ class LlamaCppInferenceEngine(private val context: Context) : InferenceEngine {
             val currentFirstToken = firstTokenMs ?: startMs
             val ttft = (currentFirstToken - startMs).coerceAtLeast(0)
             val decodeDurationSec = (finalTotalDurationMs - ttft) / 1000.0
-            val finalTps = if (decodeDurationSec > 0.05) chunkCount / decodeDurationSec else 0.0
+            val cleanFinal = sanitizeResponseText(buffer.toString("UTF-8"))
+            val estimatedFinal = maxOf(chunkCount, com.example.on_device_qwen.domain.context.PromptContextBuilder.estimateTokens(cleanFinal))
+            val finalDecodeTokens = if (totalTokens > 0) totalTokens else estimatedFinal
+            val finalTps = if (decodeDurationSec > 0.05) finalDecodeTokens / decodeDurationSec else 0.0
 
             val finalMetrics = BenchmarkMetrics(
                 ttftMs = ttft,
                 decodeTps = finalTps,
-                decodeTokens = if (totalTokens > 0) totalTokens else chunkCount,
+                prefillTokens = promptTokens,
+                decodeTokens = finalDecodeTokens,
                 totalDurationMs = finalTotalDurationMs,
                 backend = backendLabel
             )
 
             lastBenchmark = finalMetrics
-            val cleanFinal = sanitizeResponseText(buffer.toString("UTF-8"))
             trySend(GenerationChunk(
                 text = cleanFinal,
                 isComplete = true,
@@ -178,14 +189,16 @@ class LlamaCppInferenceEngine(private val context: Context) : InferenceEngine {
 
         } catch (e: CancellationException) {
             val totalMs = System.currentTimeMillis() - startMs
+            val cleanCancelled = sanitizeResponseText(buffer.toString("UTF-8"))
+            val cancelledTokens = maxOf(chunkCount, com.example.on_device_qwen.domain.context.PromptContextBuilder.estimateTokens(cleanCancelled))
             val cancelledMetrics = BenchmarkMetrics(
                 ttftMs = ((firstTokenMs ?: System.currentTimeMillis()) - startMs).coerceAtLeast(0),
                 decodeTps = 0.0,
-                decodeTokens = chunkCount,
+                prefillTokens = promptTokens,
+                decodeTokens = cancelledTokens,
                 totalDurationMs = totalMs,
                 backend = backendLabel
             )
-            val cleanCancelled = sanitizeResponseText(buffer.toString("UTF-8"))
             trySend(GenerationChunk(
                 text = cleanCancelled,
                 isComplete = true,
@@ -225,9 +238,10 @@ class LlamaCppInferenceEngine(private val context: Context) : InferenceEngine {
     override fun getBenchmarkMetrics(): BenchmarkMetrics? = lastBenchmark
 
     private fun buildChatMlPrompt(systemPrompt: String, userPrompt: String): String {
+        val cleanSystem = com.example.on_device_qwen.model.sanitizeSystemPrompt(systemPrompt)
         return buildString {
             append("<|im_start|>system\n")
-            append(systemPrompt.ifBlank { "You are Dolphin, a helpful, precise, and thoughtful AI assistant running completely offline." })
+            append(cleanSystem.ifBlank { "You are Dolphin, a helpful, precise, and thoughtful AI assistant running completely offline." })
             append("<|im_end|>\n")
             append("<|im_start|>user\n")
             append(userPrompt)

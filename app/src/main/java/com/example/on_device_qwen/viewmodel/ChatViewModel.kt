@@ -136,11 +136,147 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val _themeMode = MutableStateFlow(prefs.themeMode)
     val themeMode: StateFlow<ThemeMode> = _themeMode.asStateFlow()
 
+    private val _chatMode = MutableStateFlow(prefs.unrestrictedMode)
+    val chatMode: StateFlow<UnrestrictedMode> = _chatMode.asStateFlow()
+
+    private val _activeProfile = MutableStateFlow(prefs.activePromptProfile)
+    val activeProfile: StateFlow<PromptProfile> = _activeProfile.asStateFlow()
+
+    private val _profiles = MutableStateFlow(prefs.promptProfiles)
+    val profiles: StateFlow<List<PromptProfile>> = _profiles.asStateFlow()
+
+    private var lastValidationResult: List<com.example.on_device_qwen.domain.context.PromptValidationError> = emptyList()
+
+    /** First blocking inference-parameter error, surfaced as a UI banner. */
+    private val _validationBanner = MutableStateFlow<String?>(null)
+    val validationBanner: StateFlow<String?> = _validationBanner.asStateFlow()
+
     init {
         loadConversations()
         loadMemories()
         initializeEngine()
+        validateCurrentConfig()
     }
+
+    fun validateCurrentConfig(): List<com.example.on_device_qwen.domain.context.PromptValidationError> {
+        val config = currentGenerationConfig()
+        lastValidationResult = com.example.on_device_qwen.domain.context.PromptValidation.validate(config)
+        return lastValidationResult
+    }
+
+    fun currentGenerationConfig(): GenerationConfig {
+        val threads = thermalManager.getAdaptiveThreadCount(_performanceMode.value, _threadCount.value)
+            .coerceIn(GenerationConfig.MIN_THREAD_COUNT, GenerationConfig.MAX_THREAD_COUNT)
+        val activeProfile = _activeProfile.value
+        // Single source of truth: resolved sanitized prompt, never raw duplicated text.
+        val resolvedPrompt = activeProfile.effectiveSystemPrompt
+            .ifBlank { activeProfile.instructionText }
+            .ifBlank { _systemPrompt.value }
+        return GenerationConfig(
+            temperature = _temperature.value.coerceIn(
+                GenerationConfig.MIN_TEMPERATURE, GenerationConfig.MAX_TEMPERATURE,
+            ),
+            topP = _topP.value.coerceIn(GenerationConfig.MIN_TOP_P, GenerationConfig.MAX_TOP_P),
+            repetitionPenalty = prefs.repetitionPenalty,
+            maxOutputTokens = _maxTokens.value.coerceIn(
+                GenerationConfig.MIN_MAX_TOKENS, GenerationConfig.MAX_MAX_TOKENS,
+            ),
+            contextLength = prefs.contextLength.coerceIn(
+                GenerationConfig.MIN_CONTEXT_LENGTH, GenerationConfig.MAX_CONTEXT_LENGTH,
+            ),
+            systemPrompt = com.example.on_device_qwen.model.sanitizeSystemPrompt(resolvedPrompt),
+            threadCount = threads,
+            backend = _currentBackend.value,
+            stopSequences = GenerationConfig.DEFAULT_STOP_SEQUENCES,
+            unrestrictedMode = _chatMode.value,
+            activePromptProfileId = activeProfile.id,
+        )
+    }
+
+    /** Surfaced to Settings UI: current validation state for unsupported params. */
+    fun validationErrors(): List<com.example.on_device_qwen.domain.context.PromptValidationError> =
+        lastValidationResult.toList()
+
+    fun setChatMode(mode: UnrestrictedMode) {
+        _chatMode.value = mode
+        prefs.unrestrictedMode = mode
+        // Switching modes swaps the ACTIVE profile so the actual inference prompt
+        // changes immediately for new/continued/regenerated responses.
+        val targetId = if (mode == UnrestrictedMode.UNRESTRICTED) PromptProfile.UNRESTRICTED_ID
+        else PromptProfile.DEFAULT_ID
+        val profiles = _profiles.value.ifEmpty { prefs.promptProfiles }
+        profiles.firstOrNull { it.id == targetId }?.let { setActiveProfile(it.id) }
+        validateCurrentConfig().also { lastValidationResult = it }
+    }
+
+    fun setActiveProfile(profileId: String) {
+        val profiles = _profiles.value.ifEmpty { prefs.promptProfiles }
+        val match = profiles.firstOrNull { it.id == profileId } ?: return
+        _activeProfile.value = match
+        prefs.setActivePromptProfile(match.id)
+        _systemPrompt.value = match.effectiveSystemPrompt.ifBlank { match.instructionText }
+        prefs.systemPrompt = _systemPrompt.value
+        validateCurrentConfig().also { lastValidationResult = it }
+    }
+
+    fun savePromptProfile(profile: PromptProfile): String? {
+        val error = profile.validate()
+        if (error != null) return error
+        prefs.addOrUpdateProfile(profile)
+        _profiles.value = prefs.promptProfiles
+        if (profile.id == _activeProfile.value.id) {
+            _activeProfile.value = profile.copy(
+                effectiveSystemPrompt = com.example.on_device_qwen.model.sanitizeSystemPrompt(
+                    profile.effectiveSystemPrompt.ifBlank { profile.instructionText }
+                ),
+            )
+            _systemPrompt.value = _activeProfile.value.effectiveSystemPrompt
+            prefs.systemPrompt = _systemPrompt.value
+        }
+        validateCurrentConfig().also { lastValidationResult = it }
+        return null
+    }
+
+    fun deletePromptProfile(profileId: String) {
+        prefs.removeProfile(profileId)
+        _profiles.value = prefs.promptProfiles
+        val current = _activeProfile.value
+        if (current.id == profileId) {
+            val fallback = _profiles.value.firstOrNull() ?: PromptProfile.standardDefault()
+            _activeProfile.value = fallback
+            prefs.setActivePromptProfile(fallback.id)
+            _systemPrompt.value = fallback.effectiveSystemPrompt.ifBlank { fallback.instructionText }
+        }
+        validateCurrentConfig().also { lastValidationResult = it }
+    }
+
+    fun resetPromptProfile(profileId: String) {
+        prefs.resetProfileToDefault(profileId)
+        _profiles.value = prefs.promptProfiles
+        _profiles.value.firstOrNull { it.id == profileId }?.let { restored ->
+            if (restored.id == _activeProfile.value.id) {
+                _activeProfile.value = restored
+                _systemPrompt.value = restored.effectiveSystemPrompt
+                prefs.systemPrompt = _systemPrompt.value
+            }
+        }
+        validateCurrentConfig().also { lastValidationResult = it }
+    }
+
+    fun setRepetitionPenalty(value: Float) {
+        prefs.repetitionPenalty = value.coerceIn(
+            GenerationConfig.MIN_REPETITION_PENALTY, GenerationConfig.MAX_REPETITION_PENALTY,
+        )
+        validateCurrentConfig().also { lastValidationResult = it }
+    }
+
+    fun setContextLength(value: Int) {
+        prefs.contextLength = value.coerceIn(
+            GenerationConfig.MIN_CONTEXT_LENGTH, GenerationConfig.MAX_CONTEXT_LENGTH,
+        )
+        validateCurrentConfig().also { lastValidationResult = it }
+    }
+
 
     private fun loadConversations() {
         viewModelScope.launch {
@@ -258,15 +394,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 val backend = _currentBackend.value
                 val threads = thermalManager.getAdaptiveThreadCount(_performanceMode.value, _threadCount.value)
 
-                val config = GenerationConfig(
-                    temperature = _temperature.value,
-                    topP = _topP.value,
-                    maxOutputTokens = _maxTokens.value,
-                    contextLength = targetMetadata.contextLength,
-                    systemPrompt = _systemPrompt.value,
-                    threadCount = threads,
-                    backend = backend
-                )
+                val config = currentGenerationConfig()
 
                 _engineState.value = EngineState.Loading(
                     "Loading ${targetMetadata.name} (${targetMetadata.fileSizeMb} MB) on ${backend.chipText}…\nUsing $threads threads."
@@ -348,6 +476,28 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         if (!engine.isLoaded) return
 
         viewModelScope.launch {
+            // Validate inference parameters BEFORE mutating chat state. Unsupported
+            // or out-of-range values produce a clear, readable error instead of
+            // silently reaching the native engine.
+            val baseConfig = currentGenerationConfig()
+            val validationErrors =
+                com.example.on_device_qwen.domain.context.PromptValidation.validate(baseConfig)
+            if (validationErrors.isNotEmpty()) {
+                val detail = validationErrors.joinToString("\n") { "- ${it.message}" }
+                val errorId = System.nanoTime()
+                val userVisibleError = ChatMessage(
+                    id = errorId,
+                    conversationId = _activeConversation.value?.id ?: "",
+                    text = "⚠️ Cannot generate — fix the highlighted inference settings first:\n$detail",
+                    isUser = false,
+                    isStreaming = false,
+                    isError = true,
+                )
+                _messages.value = _messages.value + userVisibleError
+                _validationBanner.value = validationErrors.first().message
+                return@launch
+            }
+            _validationBanner.value = null
             // Ensure an active conversation session exists in SQLite
             var currentSession = _activeConversation.value
             if (currentSession == null) {
@@ -392,6 +542,30 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             val generationId = UUID.randomUUID().toString()
             activeGenerationId = generationId
 
+            // Retrieve relevant cross-chat persistent memories (works in BOTH modes;
+            // memories are delimited context, never trusted instructions).
+            val memoryContext = memoryManager.retrieveMemoryContext(promptText, session.id)
+            _lastUsedMemories.value = memoryContext.memories
+
+            val config = currentGenerationConfig().copy(generationId = generationId)
+            lastValidationResult =
+                com.example.on_device_qwen.domain.context.PromptValidation.validate(config)
+
+            // Build bounded, multi-turn conversation context. The active profile is
+            // passed through so mode switches + custom prompts apply to new,
+            // continued, AND regenerated responses. Switching chats passes a
+            // different history list, so prompts/history can't leak across chats.
+            val historyForPrompt = _messages.value
+            val formattedPrompt = com.example.on_device_qwen.domain.context.PromptContextBuilder.buildChatMl(
+                historyMessages = historyForPrompt,
+                latestUserPrompt = promptText,
+                memoryContext = memoryContext,
+                config = config,
+                promptProfile = _activeProfile.value,
+                profiles = _profiles.value,
+            )
+            val estimatedPromptTokens = com.example.on_device_qwen.domain.context.PromptContextBuilder.estimateTokens(formattedPrompt)
+
             val botMsgId = System.nanoTime()
             val initialBotMsg = ChatMessage(
                 id = botMsgId,
@@ -399,35 +573,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 text = "",
                 isUser = false,
                 isStreaming = true,
-                benchmark = BenchmarkMetrics(backend = _currentBackend.value.chipText)
+                benchmark = BenchmarkMetrics(
+                    backend = _currentBackend.value.chipText,
+                    prefillTokens = estimatedPromptTokens
+                )
             )
             _messages.value = _messages.value + initialBotMsg
             _isGenerating.value = true
-
-            // Retrieve relevant cross-chat persistent memories
-            val memoryContext = memoryManager.retrieveMemoryContext(promptText, session.id)
-            _lastUsedMemories.value = memoryContext.memories
-
-            val threads = thermalManager.getAdaptiveThreadCount(_performanceMode.value, _threadCount.value)
-            val config = GenerationConfig(
-                temperature = _temperature.value,
-                topP = _topP.value,
-                repetitionPenalty = prefs.repetitionPenalty,
-                maxOutputTokens = _maxTokens.value,
-                systemPrompt = _systemPrompt.value,
-                threadCount = threads,
-                backend = _currentBackend.value,
-                generationId = generationId
-            )
-
-            // Build bounded, multi-turn conversation context
-            val historyForPrompt = _messages.value.filter { it.id != botMsgId }
-            val formattedPrompt = com.example.on_device_qwen.domain.context.PromptContextBuilder.buildChatMl(
-                historyMessages = historyForPrompt,
-                latestUserPrompt = promptText,
-                memoryContext = memoryContext,
-                config = config
-            )
 
             generationJob = viewModelScope.launch {
                 try {
@@ -440,21 +592,23 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
                         val now = android.os.SystemClock.elapsedRealtime()
                         val isComplete = chunk.isComplete
-                        if (isComplete || now - lastUiUpdateMs >= 35L) {
+                        if (isComplete || now - lastUiUpdateMs >= 50L) {
                             lastUiUpdateMs = now
                             val parsed = parseReasoningTags(chunk.text)
 
                             withContext(Dispatchers.Main) {
                                 if (activeGenerationId != generationId) return@withContext
-                                _messages.value = _messages.value.map { msg ->
-                                    if (msg.id == botMsgId) {
-                                        msg.copy(
-                                            text = parsed.answer,
-                                            thinkText = parsed.think,
-                                            isStreaming = !chunk.isComplete,
-                                            benchmark = chunk.metrics
-                                        )
-                                    } else msg
+                                val current = _messages.value
+                                val targetIdx = current.indexOfLast { it.id == botMsgId }
+                                if (targetIdx >= 0) {
+                                    val updated = current.toMutableList()
+                                    updated[targetIdx] = updated[targetIdx].copy(
+                                        text = parsed.answer,
+                                        thinkText = parsed.think,
+                                        isStreaming = !chunk.isComplete,
+                                        benchmark = chunk.metrics
+                                    )
+                                    _messages.value = updated
                                 }
                             }
                         }
@@ -594,9 +748,20 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     // ── Conversation Lifecycle ────────────────────────────────────────────────
+    /** Resets engine state with the CURRENT mode prompt so chats never leak prompts. */
+    private fun resetEngineForCurrentMode() {
+        val engine = activeEngine
+        val prompt = currentGenerationConfig().systemPrompt
+        if (engine is com.example.on_device_qwen.domain.engine.LiteRTInferenceEngine) {
+            engine.resetConversationWithSystemPrompt(prompt)
+        } else {
+            engine?.resetConversation()
+        }
+    }
+
     fun newChat() {
         if (_isGenerating.value) stopGeneration()
-        activeEngine?.resetConversation()
+        resetEngineForCurrentMode()
         _activeConversation.value = null
         _messages.value = emptyList()
         _lastUsedMemories.value = emptyList()
@@ -604,7 +769,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     fun selectConversation(session: ConversationSession) {
         if (_isGenerating.value) stopGeneration()
-        activeEngine?.resetConversation()
+        resetEngineForCurrentMode()
         _activeConversation.value = session
         _lastUsedMemories.value = emptyList()
         viewModelScope.launch {
@@ -680,33 +845,66 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setThreadCount(count: Int) {
-        _threadCount.value = count
-        prefs.threadCount = count
+        val clamped = count.coerceIn(GenerationConfig.MIN_THREAD_COUNT, GenerationConfig.MAX_THREAD_COUNT)
+        _threadCount.value = clamped
+        prefs.threadCount = clamped
+        validateCurrentConfig().also { lastValidationResult = it }
     }
 
     fun setTemperature(temp: Float) {
-        _temperature.value = temp
-        prefs.temperature = temp
+        val clamped = temp.coerceIn(GenerationConfig.MIN_TEMPERATURE, GenerationConfig.MAX_TEMPERATURE)
+        _temperature.value = clamped
+        prefs.temperature = clamped
+        validateCurrentConfig().also { lastValidationResult = it }
     }
 
     fun setTopP(p: Float) {
-        _topP.value = p
-        prefs.topP = p
+        val clamped = p.coerceIn(GenerationConfig.MIN_TOP_P, GenerationConfig.MAX_TOP_P)
+        _topP.value = clamped
+        prefs.topP = clamped
+        validateCurrentConfig().also { lastValidationResult = it }
     }
 
     fun setMaxTokens(tokens: Int) {
-        _maxTokens.value = tokens
-        prefs.maxOutputTokens = tokens
+        val clamped = tokens.coerceIn(GenerationConfig.MIN_MAX_TOKENS, GenerationConfig.MAX_MAX_TOKENS)
+        _maxTokens.value = clamped
+        prefs.maxOutputTokens = clamped
+        validateCurrentConfig().also { lastValidationResult = it }
     }
 
+    fun setActivePromptProfile(profile: PromptProfile) {
+        setActiveProfile(profile.id)
+    }
+
+    fun updatePromptProfiles(profiles: List<PromptProfile>) {
+        profiles.forEach { prefs.addOrUpdateProfile(it) }
+        _profiles.value = prefs.promptProfiles
+        validateCurrentConfig().also { lastValidationResult = it }
+    }
+
+    fun saveActiveProfile(profile: PromptProfile): String? = savePromptProfile(profile)
+
     fun setSystemPrompt(prompt: String) {
-        _systemPrompt.value = prompt
-        prefs.systemPrompt = prompt
+        val clean = com.example.on_device_qwen.model.sanitizeSystemPrompt(prompt)
+        _systemPrompt.value = clean
+        prefs.systemPrompt = clean
+        // Keep the active profile in sync so the editor visibly changes inference.
+        val current = _activeProfile.value
+        val updated = current.copy(instructionText = clean, effectiveSystemPrompt = clean)
+        prefs.addOrUpdateProfile(updated)
+        _profiles.value = prefs.promptProfiles
+        _activeProfile.value = updated
+        validateCurrentConfig().also { lastValidationResult = it }
     }
 
     fun setThemeMode(mode: ThemeMode) {
         _themeMode.value = mode
         prefs.themeMode = mode
+    }
+
+    fun regenerationConfig(): GenerationConfig {
+        // Regeneration must reuse the same chat mode / prompt profile as the original turn.
+        return currentGenerationConfig()
     }
 
     private fun saveUriToCache(uri: Uri): File? {

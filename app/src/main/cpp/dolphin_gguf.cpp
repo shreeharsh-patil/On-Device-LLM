@@ -56,7 +56,11 @@ void native_close(JNIEnv*, jobject, jlong handle) {
     delete session;
 }
 
-jint native_generate(JNIEnv* env, jobject, jlong handle, jstring prompt, jint max_new_tokens, jobject listener) {
+// Sampling params are validated in Kotlin (GenerationConfig ranges) then clamped
+// again here so a bad JNI call can never build a degenerate sampler chain.
+// temp: 0 = greedy (argmax), >0 = temperature. rep: 1.0 = disabled.
+jint native_generate(JNIEnv* env, jobject, jlong handle, jstring prompt, jint max_new_tokens,
+                     jfloat j_temp, jfloat j_top_p, jfloat j_rep, jobject listener) {
     Session* s = reinterpret_cast<Session*>(handle);
     if (!s || !prompt || !listener) { throw_java(env, "No GGUF model loaded"); return -1; }
     jclass listener_class = env->GetObjectClass(listener);
@@ -98,11 +102,20 @@ jint native_generate(JNIEnv* env, jobject, jlong handle, jstring prompt, jint ma
         }
     }
 
+    const float temperature = std::clamp((float) j_temp, 0.0f, 2.0f);
+    const float top_p       = std::clamp((float) j_top_p, 0.05f, 1.0f);
+    const float rep_penalty = std::clamp((float) j_rep, 1.0f, 2.0f);
+
     llama_sampler* sampler = llama_sampler_chain_init(llama_sampler_chain_default_params());
-    // Repetition penalty: penalize last 64 tokens with 1.15x factor to prevent infinite repeating loops
-    llama_sampler_chain_add(sampler, llama_sampler_init_penalties(64, 1.15f, 0.05f, 0.05f));
-    llama_sampler_chain_add(sampler, llama_sampler_init_top_p(0.9f, 1));
-    llama_sampler_chain_add(sampler, llama_sampler_init_temp(0.7f));
+    // Repetition penalty: penalize last 64 tokens to prevent infinite repeating loops.
+    // 1.15x default; user-configurable in [1.0, 2.0] via settings.
+    llama_sampler_chain_add(sampler, llama_sampler_init_penalties(64, rep_penalty, 0.05f, 0.05f));
+    llama_sampler_chain_add(sampler, llama_sampler_init_top_p(top_p, 1));
+    // Temperature <= 0 requests greedy decoding (argmax); the temp sampler is
+    // skipped entirely so we never divide by a zero/garbage temperature.
+    if (temperature > 0.0f) {
+        llama_sampler_chain_add(sampler, llama_sampler_init_temp(temperature));
+    }
     llama_sampler_chain_add(sampler, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
 
     int generated = 0;
@@ -192,7 +205,7 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {
     if (!cls) return JNI_ERR;
     static JNINativeMethod methods[] = {
         {"nativeOpen", "(Ljava/lang/String;II)J", reinterpret_cast<void*>(native_open)},
-        {"nativeGenerate", "(JLjava/lang/String;ILcom/example/on_device_qwen/inference/ChunkListener;)I", reinterpret_cast<void*>(native_generate)},
+        {"nativeGenerate", "(JLjava/lang/String;IFFFLcom/example/on_device_qwen/inference/ChunkListener;)I", reinterpret_cast<void*>(native_generate)},
         {"nativeClose", "(J)V", reinterpret_cast<void*>(native_close)}
     };
     int result = env->RegisterNatives(cls, methods, 3);

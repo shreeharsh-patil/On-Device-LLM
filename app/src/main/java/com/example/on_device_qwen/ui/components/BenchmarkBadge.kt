@@ -130,12 +130,26 @@ fun BenchmarkBadge(
                 }
             }
 
-            if (!isStreaming && benchmark.decodeTokens > 0) {
+            val displayTokens = benchmark.decodeTokens
+            if (displayTokens > 0) {
                 Spacer(Modifier.weight(1f))
+                val totalTok = (benchmark.prefillTokens ?: 0) + displayTokens
+                val tokenText = if (isStreaming) {
+                    "$displayTokens tok"
+                } else {
+                    val promptDetail = if (benchmark.prefillTokens != null && benchmark.prefillTokens > 0) {
+                        " ($totalTok total)"
+                    } else ""
+                    val durationDetail = if (benchmark.totalDurationMs > 0) {
+                        " • ${String.format(java.util.Locale.US, "%.1fs", benchmark.totalDurationMs / 1000.0)}"
+                    } else ""
+                    "$displayTokens tok$promptDetail$durationDetail"
+                }
                 Text(
-                    text = "${benchmark.decodeTokens} tok" + (if (benchmark.totalDurationMs > 0) " (${String.format(java.util.Locale.US, "%.1fs", benchmark.totalDurationMs / 1000.0)})" else ""),
+                    text = tokenText,
                     style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                    fontWeight = if (isStreaming) FontWeight.Bold else FontWeight.Medium,
+                    color = if (isStreaming) QwenPrimary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
                 )
             }
         }

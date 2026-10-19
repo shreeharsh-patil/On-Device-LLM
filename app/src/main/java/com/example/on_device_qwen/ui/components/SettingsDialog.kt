@@ -21,6 +21,8 @@ import com.example.on_device_qwen.data.preferences.PerformanceMode
 import com.example.on_device_qwen.data.preferences.ThemeMode
 import com.example.on_device_qwen.domain.performance.DeviceThermalState
 import com.example.on_device_qwen.model.BackendType
+import com.example.on_device_qwen.model.PromptProfile
+import com.example.on_device_qwen.model.UnrestrictedMode
 import com.example.on_device_qwen.ui.theme.QwenPrimary
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -40,6 +42,14 @@ fun SettingsDialog(
     onMaxTokensChange: (Int) -> Unit,
     systemPrompt: String,
     onSystemPromptChange: (String) -> Unit,
+    chatMode: UnrestrictedMode,
+    onChatModeChange: (UnrestrictedMode) -> Unit,
+    activeProfile: PromptProfile,
+    onActiveProfileChange: (PromptProfile) -> Unit,
+    profiles: List<PromptProfile>,
+    onProfileSaved: (PromptProfile) -> Unit,
+    onProfileDeleted: (String) -> Unit,
+    onProfileReset: (String) -> Unit,
     themeMode: ThemeMode,
     onThemeModeChange: (ThemeMode) -> Unit,
     thermalState: DeviceThermalState,
@@ -243,17 +253,179 @@ fun SettingsDialog(
                         }
                     }
 
-                    // 6. System Prompt
-                    SettingsSection(title = "Custom System Prompt") {
-                        OutlinedTextField(
-                            value = systemPrompt,
-                            onValueChange = onSystemPromptChange,
-                            modifier = Modifier.fillMaxWidth(),
-                            minLines = 3,
-                            maxLines = 6,
-                            shape = RoundedCornerShape(12.dp)
-                        )
+                    // 6. Chat Mode
+                    SettingsSection(title = "Inference Mode") {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text("Selected mode", fontWeight = FontWeight.Medium)
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = if (chatMode == UnrestrictedMode.UNRESTRICTED)
+                                        MaterialTheme.colorScheme.primaryContainer
+                                    else
+                                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                ) {
+                                    Text(
+                                        text = chatMode.displayName,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                UnrestrictedMode.entries.forEach { mode ->
+                                    FilterChip(
+                                        selected = mode == chatMode,
+                                        onClick = { onChatModeChange(mode) },
+                                        label = { Text(mode.displayName) },
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                }
+                            }
+                            Text(
+                                text = "Unrestricted mode changes the system prompt and uses the active prompt profile below. " +
+                                    "It does not remove restrictions present in the model weights or local inference wrapper.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                     }
+
+                    // 6b. Prompt Profiles
+                    SettingsSection(title = "Prompt Profiles") {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(
+                                text = "Active profile: ${activeProfile.name}",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Medium
+                            )
+                            Text(
+                                text = activeProfile.instructionText.ifBlank { "(No custom instructions)" },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 3,
+                                modifier = Modifier.heightIn(max = 80.dp)
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            profiles.forEach { profile ->
+                                val isSelected = profile.id == activeProfile.id
+                                Surface(
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = if (isSelected)
+                                        MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)
+                                    else
+                                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { onActiveProfileChange(profile) }
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(10.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = profile.name,
+                                                fontWeight = FontWeight.SemiBold
+                                            )
+                                            Text(
+                                                text = profile.instructionText.ifBlank { "Empty profile" },
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                maxLines = 2
+                                            )
+                                        }
+                                        IconButton(onClick = { onProfileReset(profile.id) }) {
+                                            Icon(
+                                                Icons.Default.Refresh,
+                                                contentDescription = "Reset profile to its original text",
+                                                modifier = Modifier.size(18.dp),
+                                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                    }
+                                }
+                                Spacer(Modifier.height(4.dp))
+                            }
+                        }
+                    }
+
+                    // 6c. Profile Editor
+                    SettingsSection(title = "Edit / Save Prompt Profile") {
+                        // Key on the profile id so switching the active profile resets the
+                        // draft instead of keeping stale text from the previous profile.
+                        var editorName by remember(activeProfile.id) { mutableStateOf(activeProfile.name) }
+                        var editorText by remember(activeProfile.id) { mutableStateOf(activeProfile.instructionText) }
+                        var editorError by remember(activeProfile.id) { mutableStateOf<String?>(null) }
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            editorError?.let { msg ->
+                                Text(
+                                    text = msg,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.error
+                                )
+                            }
+                            OutlinedTextField(
+                                value = editorText,
+                                onValueChange = { editorText = it },
+                                modifier = Modifier.fillMaxWidth(),
+                                minLines = 3,
+                                maxLines = 6,
+                                label = { Text("System prompt / instruction text") },
+                                isError = editorError != null,
+                                shape = RoundedCornerShape(12.dp)
+                            )
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                OutlinedTextField(
+                                    value = editorName,
+                                    onValueChange = { editorName = it },
+                                    modifier = Modifier.weight(1f),
+                                    label = { Text("Profile name") },
+                                    shape = RoundedCornerShape(10.dp)
+                                )
+                                IconButton(
+                                    onClick = {
+                                        // Save a NEW profile derived from the draft, keyed by
+                                        // name (so editing an existing profile updates it).
+                                        val trimmedName = editorName.trim()
+                                        val existing = profiles.firstOrNull {
+                                            it.name.equals(trimmedName, ignoreCase = true)
+                                        }
+                                        val toSave = (existing ?: PromptProfile(
+                                            name = trimmedName,
+                                            instructionText = editorText,
+                                            effectiveSystemPrompt = editorText
+                                        )).copy(
+                                            name = trimmedName,
+                                            instructionText = editorText,
+                                            effectiveSystemPrompt = editorText.ifBlank {
+                                                activeProfile.effectiveSystemPrompt
+                                            }
+                                        )
+                                        val validationResult = toSave.validate()
+                                        if (validationResult != null) {
+                                            editorError = validationResult
+                                        } else {
+                                            onProfileSaved(toSave)
+                                            onActiveProfileChange(toSave)
+                                            editorError = null
+                                        }
+                                    }
+                                ) {
+                                    Icon(Icons.Default.Save, contentDescription = "Save profile")
+                                }
+                            }
+                        }
+                    }
+
 
                     // 6. Theme Mode
                     SettingsSection(title = "Theme") {
@@ -272,7 +444,19 @@ fun SettingsDialog(
                         }
                     }
 
-                    // 7. Device Diagnostics
+                    // 7. Validation Status
+                    SettingsSection(title = "Inference Parameter Validation") {
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text(
+                                text = "Inference parameters are validated before generation. " +
+                                    "Out-of-range values are blocked with a clear error.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+                    }
+
+                    // 8. Device Diagnostics
                     SettingsSection(title = "Device Health & Thermal State") {
                         Surface(
                             shape = RoundedCornerShape(12.dp),
@@ -310,7 +494,7 @@ fun SettingsDialog(
 }
 
 @Composable
-private fun SettingsSection(title: String, content: @Composable ColumnScope.() -> Unit) {
+fun SettingsSection(title: String, content: @Composable ColumnScope.() -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(
             text = title,

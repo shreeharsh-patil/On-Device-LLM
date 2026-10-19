@@ -90,6 +90,10 @@ class LiteRTInferenceEngine(private val context: Context) : InferenceEngine {
             val convConfig = ConversationConfig(
                 systemInstruction = Contents.of(config.systemPrompt)
             )
+
+            // LiteRT ConversationConfig accepts the system instruction text directly.
+            // When unrestricted mode is selected, the ViewModel supplies the chosen prompt profile
+            // through config.systemPrompt, so no additional template rewriting is required here.
             // BUG-028 FIX: Use safe null check instead of engine!! to produce a clear
             // error if both primary and CPU fallback engine construction fail.
             val initializedEngine = engine
@@ -149,6 +153,7 @@ class LiteRTInferenceEngine(private val context: Context) : InferenceEngine {
         val buffer = StringBuilder()
         val backendLabel = currentBackendType.chipText
 
+        val promptTokens = com.example.on_device_qwen.domain.context.PromptContextBuilder.estimateTokens(prompt)
         try {
             if (imagePath != null && File(imagePath).exists()) {
                 val contents = Contents.of(
@@ -168,16 +173,19 @@ class LiteRTInferenceEngine(private val context: Context) : InferenceEngine {
 
                     val ttft = (currentFirstToken - startMs).coerceAtLeast(0)
                     val decodeDurationSec = (now - currentFirstToken) / 1000.0
-                    val liveTps = if (decodeDurationSec > 0.05) chunkCount / decodeDurationSec else 0.0
+                    val currentText = buffer.toString()
+                    val liveDecodeTokens = maxOf(chunkCount, com.example.on_device_qwen.domain.context.PromptContextBuilder.estimateTokens(currentText))
+                    val liveTps = if (decodeDurationSec > 0.05) liveDecodeTokens / decodeDurationSec else 0.0
 
                     val liveMetrics = BenchmarkMetrics(
                         ttftMs = ttft,
                         decodeTps = liveTps,
-                        decodeTokens = chunkCount,
+                        prefillTokens = promptTokens,
+                        decodeTokens = liveDecodeTokens,
                         totalDurationMs = now - startMs,
                         backend = backendLabel
                     )
-                    trySend(GenerationChunk(text = buffer.toString(), isComplete = false, metrics = liveMetrics))
+                    trySend(GenerationChunk(text = currentText, isComplete = false, metrics = liveMetrics, generationId = config.generationId))
                 }
             } else {
                 activeConv.sendMessageAsync(prompt).collect { chunk ->
@@ -190,18 +198,20 @@ class LiteRTInferenceEngine(private val context: Context) : InferenceEngine {
 
                     val ttft = (currentFirstToken - startMs).coerceAtLeast(0)
                     val decodeDurationSec = (now - currentFirstToken) / 1000.0
-                    val liveTps = if (decodeDurationSec > 0.05) chunkCount / decodeDurationSec else 0.0
+                    val currentText = buffer.toString()
+                    val liveDecodeTokens = maxOf(chunkCount, com.example.on_device_qwen.domain.context.PromptContextBuilder.estimateTokens(currentText))
+                    val liveTps = if (decodeDurationSec > 0.05) liveDecodeTokens / decodeDurationSec else 0.0
 
                     val liveMetrics = BenchmarkMetrics(
                         ttftMs = ttft,
                         decodeTps = liveTps,
-                        decodeTokens = chunkCount,
+                        prefillTokens = promptTokens,
+                        decodeTokens = liveDecodeTokens,
                         totalDurationMs = now - startMs,
                         backend = backendLabel
                     )
-                    val liveText = buffer.toString()
                     trySend(GenerationChunk(
-                        text = liveText,
+                        text = currentText,
                         isComplete = false,
                         metrics = liveMetrics,
                         generationId = config.generationId
@@ -212,25 +222,32 @@ class LiteRTInferenceEngine(private val context: Context) : InferenceEngine {
             // Extract engine-level benchmark if available
             val finalTotalDurationMs = System.currentTimeMillis() - startMs
             val benchInfo = try { activeConv.getBenchmarkInfo() } catch (_: Exception) { null }
+            val currentFirstToken = firstTokenMs ?: startMs
+            val ttft = ((firstTokenMs ?: System.currentTimeMillis()) - startMs).coerceAtLeast(0)
+            val decodeDurationSec = (finalTotalDurationMs - ttft) / 1000.0
+            val finalText = buffer.toString()
+            val estimatedTokens = maxOf(chunkCount, com.example.on_device_qwen.domain.context.PromptContextBuilder.estimateTokens(finalText))
+            val actualDecodeTokens = if (benchInfo != null && benchInfo.lastDecodeTokenCount > 0) benchInfo.lastDecodeTokenCount else estimatedTokens
+            val actualPrefillTokens = if (benchInfo != null && benchInfo.lastPrefillTokenCount > 0) benchInfo.lastPrefillTokenCount else promptTokens
+
             val finalMetrics = if (benchInfo != null && benchInfo.lastDecodeTokensPerSecond > 0) {
-                val ttft = (benchInfo.timeToFirstTokenInSecond * 1000).toLong().coerceAtLeast(0)
+                val benchTtft = (benchInfo.timeToFirstTokenInSecond * 1000).toLong().coerceAtLeast(0)
                 BenchmarkMetrics(
-                    ttftMs = if (ttft > 0) ttft else ((firstTokenMs ?: System.currentTimeMillis()) - startMs).coerceAtLeast(0),
+                    ttftMs = if (benchTtft > 0) benchTtft else ttft,
                     decodeTps = benchInfo.lastDecodeTokensPerSecond,
                     prefillTps = if (benchInfo.lastPrefillTokensPerSecond > 0) benchInfo.lastPrefillTokensPerSecond else null,
-                    prefillTokens = if (benchInfo.lastPrefillTokenCount > 0) benchInfo.lastPrefillTokenCount else null,
-                    decodeTokens = if (benchInfo.lastDecodeTokenCount > 0) benchInfo.lastDecodeTokenCount else chunkCount,
+                    prefillTokens = actualPrefillTokens,
+                    decodeTokens = actualDecodeTokens,
                     totalDurationMs = finalTotalDurationMs,
                     backend = backendLabel
                 )
             } else {
-                val ttft = ((firstTokenMs ?: System.currentTimeMillis()) - startMs).coerceAtLeast(0)
-                val decodeDurationSec = (finalTotalDurationMs - ttft) / 1000.0
-                val fallbackTps = if (decodeDurationSec > 0.05) chunkCount / decodeDurationSec else 0.0
+                val fallbackTps = if (decodeDurationSec > 0.05) actualDecodeTokens / decodeDurationSec else 0.0
                 BenchmarkMetrics(
                     ttftMs = ttft,
                     decodeTps = fallbackTps,
-                    decodeTokens = chunkCount,
+                    prefillTokens = actualPrefillTokens,
+                    decodeTokens = actualDecodeTokens,
                     totalDurationMs = finalTotalDurationMs,
                     backend = backendLabel
                 )
@@ -246,15 +263,18 @@ class LiteRTInferenceEngine(private val context: Context) : InferenceEngine {
 
         } catch (e: CancellationException) {
             val totalMs = System.currentTimeMillis() - startMs
+            val cancelledText = buffer.toString()
+            val cancelledTokens = maxOf(chunkCount, com.example.on_device_qwen.domain.context.PromptContextBuilder.estimateTokens(cancelledText))
             val cancelledMetrics = BenchmarkMetrics(
                 ttftMs = ((firstTokenMs ?: System.currentTimeMillis()) - startMs).coerceAtLeast(0),
                 decodeTps = 0.0,
-                decodeTokens = chunkCount,
+                prefillTokens = promptTokens,
+                decodeTokens = cancelledTokens,
                 totalDurationMs = totalMs,
                 backend = backendLabel
             )
             trySend(GenerationChunk(
-                text = buffer.toString(),
+                text = cancelledText,
                 isComplete = true,
                 metrics = cancelledMetrics,
                 generationId = config.generationId
@@ -271,14 +291,24 @@ class LiteRTInferenceEngine(private val context: Context) : InferenceEngine {
     }
 
     override fun resetConversation() {
+        resetConversationWithSystemPrompt(null)
+    }
+
+    /** Mode-aware reset so switching chats/modes never leaks the old system prompt. */
+    fun resetConversationWithSystemPrompt(systemPrompt: String?) {
         try {
             conversation?.close()
         } catch (_: Exception) {}
         val eng = engine
         if (eng != null) {
             try {
+                // Null = fall back to default; otherwise use the sanitized prompt the
+                // ViewModel resolved from the active profile + mode.
+                val resolved = systemPrompt
+                    ?.let { com.example.on_device_qwen.model.sanitizeSystemPrompt(it) }
+                    ?: GenerationConfig.DEFAULT_SYSTEM_PROMPT
                 val convConfig = ConversationConfig(
-                    systemInstruction = Contents.of(_activeModel?.let { GenerationConfig.DEFAULT_SYSTEM_PROMPT } ?: "")
+                    systemInstruction = Contents.of(resolved)
                 )
                 conversation = eng.createConversation(convConfig)
             } catch (_: Exception) {}

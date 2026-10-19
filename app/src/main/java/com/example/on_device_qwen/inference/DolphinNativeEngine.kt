@@ -67,11 +67,25 @@ class DolphinNativeEngine : Closeable {
         isClosed.set(false)
     }
 
-    fun generate(prompt: String, maxTokens: Int = 1024, listener: ChunkListener): Int {
+    /**
+     * Streams generated tokens. [temperature]/[topP]/[repetitionPenalty] are validated in
+     * Kotlin and clamped again natively so a bad call can't build a degenerate sampler.
+     */
+    fun generate(
+        prompt: String,
+        maxTokens: Int = 1024,
+        temperature: Float = 0.7f,
+        topP: Float = 0.9f,
+        repetitionPenalty: Float = 1.15f,
+        listener: ChunkListener
+    ): Int {
         check(isNativeLoaded) { "Native llama.cpp library is not available on this device ABI" }
         check(modelHandle != 0L && !isClosed.get()) { "GGUF model is not loaded — call load() before generate()" }
 
-        return nativeGenerate(modelHandle, prompt, maxTokens, listener)
+        return nativeGenerate(
+            modelHandle, prompt, maxTokens,
+            temperature, topP, repetitionPenalty, listener
+        )
     }
 
     override fun close() {
@@ -93,6 +107,9 @@ class DolphinNativeEngine : Closeable {
         handle: Long,
         prompt: String,
         maxNewTokens: Int,
+        temperature: Float,
+        topP: Float,
+        repetitionPenalty: Float,
         listener: ChunkListener
     ): Int
     private external fun nativeClose(handle: Long)

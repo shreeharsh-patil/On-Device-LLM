@@ -1,19 +1,9 @@
 package com.example.on_device_qwen.domain.context
 
-import com.example.on_device_qwen.model.ChatMessage
-import com.example.on_device_qwen.model.GenerationConfig
-import com.example.on_device_qwen.model.MemoryCategory
-import com.example.on_device_qwen.model.RetrievedMemoryContext
+import com.example.on_device_qwen.model.*
 
-/**
- * Robust, bounded context window manager and prompt constructor.
- * Solves follow-up resolution, token budget reservation, and memory context injection.
- */
 object PromptContextBuilder {
 
-    /**
-     * Estimates token count using a fast character heuristic (~3.8 chars per token for English & code).
-     */
     fun estimateTokens(text: String): Int {
         if (text.isEmpty()) return 0
         return (text.length / 3.8).toInt() + 1
@@ -55,7 +45,25 @@ object PromptContextBuilder {
                     appendLine("- ${m.content}")
                 }
             }
-            appendLine("[End Context]")
+
+            val otherMems = memoryContext.memories.filter {
+                it.category !in listOf(MemoryCategory.USER, MemoryCategory.PROJECT, MemoryCategory.EPISODIC)
+            }
+            if (otherMems.isNotEmpty()) {
+                appendLine("Additional Context:")
+                for (m in otherMems) {
+                    appendLine("- ${m.content}")
+                }
+            }
+            append("[End Context]")
+        }
+    }
+
+    fun buildInferenceModeBanner(config: GenerationConfig): String {
+        return if (config.unrestrictedMode == UnrestrictedMode.UNRESTRICTED) {
+            "[Inference mode: Unrestricted]\n"
+        } else {
+            "[Inference mode: Standard]\n"
         }
     }
 
@@ -70,44 +78,48 @@ object PromptContextBuilder {
         historyMessages: List<ChatMessage>,
         latestUserPrompt: String,
         memoryContext: RetrievedMemoryContext,
-        config: GenerationConfig
+        config: GenerationConfig,
+        profiles: List<PromptProfile> = PromptProfile.builtInProfiles(),
+        promptProfile: PromptProfile? = null
     ): String {
         val totalCapacity = config.contextLength
         val reserveOutputTokens = config.maxOutputTokens.coerceAtLeast(256)
         val budgetForInput = (totalCapacity - reserveOutputTokens - 32).coerceAtLeast(512)
 
-        // 1. Build System Block
-        val baseSystem = config.systemPrompt.ifBlank { GenerationConfig.DEFAULT_SYSTEM_PROMPT }
+        val resolvedProfile = promptProfile
+            ?: config.effectivePromptProfile(profiles)
+
+        val baseSystem = resolvedProfile.effectiveSystemPrompt.ifBlank { config.systemPrompt }.ifBlank { GenerationConfig.DEFAULT_SYSTEM_PROMPT }
+        val modeBanner = buildInferenceModeBanner(config)
         val memoryBlock = formatMemorySection(memoryContext)
-        val fullSystemText = if (memoryBlock.isNotBlank()) "$baseSystem\n$memoryBlock" else baseSystem
+        val fullSystemText = if (memoryBlock.isNotBlank()) "$modeBanner$baseSystem\n$memoryBlock" else "$modeBanner$baseSystem"
         val systemTokens = estimateTokens(fullSystemText) + 8
 
-        // 2. Latest User Prompt (mandatory)
         val latestUserTokens = estimateTokens(latestUserPrompt) + 8
-
         var remainingBudget = budgetForInput - systemTokens - latestUserTokens
 
-        // 3. Select previous messages backwards in time that fit in remaining budget
-        // Filter out streaming or empty assistant messages
         val validHistory = historyMessages.filter { it.text.isNotBlank() && !it.isStreaming }
+        val historyWithoutLatest = if (validHistory.isNotEmpty() && validHistory.last().isUser && validHistory.last().text.trim() == latestUserPrompt.trim()) {
+            validHistory.dropLast(1)
+        } else {
+            validHistory
+        }
         val selectedMessages = mutableListOf<ChatMessage>()
 
-        for (i in validHistory.indices.reversed()) {
-            val msg = validHistory[i]
+        for (i in historyWithoutLatest.indices.reversed()) {
+            val msg = historyWithoutLatest[i]
             val msgTokens = estimateTokens(msg.text) + 8
             if (remainingBudget - msgTokens >= 0) {
                 selectedMessages.add(0, msg)
                 remainingBudget -= msgTokens
             } else {
-                // Out of budget, stop including older messages
                 break
             }
         }
 
-        // 4. Assemble standard ChatML format
         return buildString {
             append("<|im_start|>system\n")
-            append(fullSystemText)
+            append(fullSystemText.trim())
             append("<|im_end|>\n")
 
             for (msg in selectedMessages) {
@@ -124,9 +136,38 @@ object PromptContextBuilder {
         }
     }
 
-    /**
-     * Prepares structured message list for LiteRT or multi-turn conversational backends.
-     */
+    fun buildChatMl(
+        historyMessages: List<ChatMessage>,
+        latestUserPrompt: String,
+        memoryContext: RetrievedMemoryContext,
+        config: GenerationConfig
+    ): String = buildChatMl(
+        historyMessages = historyMessages,
+        latestUserPrompt = latestUserPrompt,
+        memoryContext = memoryContext,
+        config = config,
+        profiles = PromptProfile.builtInProfiles(),
+        promptProfile = null
+    )
+
+    fun buildChatMl(
+        historyMessages: List<ChatMessage>,
+        latestUserPrompt: String,
+        memoryContext: RetrievedMemoryContext,
+        config: GenerationConfig,
+        profiles: List<PromptProfile>
+    ): String = buildChatMl(
+        historyMessages = historyMessages,
+        latestUserPrompt = latestUserPrompt,
+        memoryContext = memoryContext,
+        config = config,
+        profiles = profiles,
+        promptProfile = config.effectivePromptProfile(profiles)
+    )
+
+    fun sanitizeSystemPrompt(raw: String): String =
+        com.example.on_device_qwen.model.sanitizeSystemPrompt(raw)
+
     fun buildTurns(
         historyMessages: List<ChatMessage>,
         latestUserPrompt: String,
@@ -136,7 +177,6 @@ object PromptContextBuilder {
         val validHistory = historyMessages.filter { it.text.isNotBlank() && !it.isStreaming }
         val turns = mutableListOf<Pair<String, Boolean>>()
 
-        // Include recent history (up to last 10 turns)
         for (msg in validHistory.takeLast(10)) {
             turns.add(Pair(msg.text, msg.isUser))
         }

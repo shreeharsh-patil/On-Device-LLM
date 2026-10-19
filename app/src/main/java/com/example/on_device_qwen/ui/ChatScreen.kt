@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.lazy.rememberLazyListState
 import java.io.File
 import androidx.compose.foundation.shape.CircleShape
@@ -48,6 +49,7 @@ import androidx.compose.ui.unit.sp
 import com.example.on_device_qwen.R
 import com.example.on_device_qwen.model.ChatMessage
 import com.example.on_device_qwen.model.ModelErrorCode
+import com.example.on_device_qwen.model.UnrestrictedMode
 import com.example.on_device_qwen.ui.components.*
 import com.example.on_device_qwen.viewmodel.ChatViewModel
 import com.example.on_device_qwen.viewmodel.EngineState
@@ -65,6 +67,10 @@ fun ChatScreen(viewModel: ChatViewModel) {
     val discoveredModels by viewModel.discoveredModels.collectAsState()
     val currentBackend by viewModel.currentBackend.collectAsState()
     val performanceMode by viewModel.performanceMode.collectAsState()
+    val chatMode by viewModel.chatMode.collectAsState()
+    val validationBanner by viewModel.validationBanner.collectAsState()
+    val activeProfile by viewModel.activeProfile.collectAsState()
+    val profiles by viewModel.profiles.collectAsState()
     val conversations by viewModel.conversations.collectAsState()
     val activeConversation by viewModel.activeConversation.collectAsState()
     val searchQuery by viewModel.searchQuery.collectAsState()
@@ -215,6 +221,14 @@ fun ChatScreen(viewModel: ChatViewModel) {
             onMaxTokensChange = { viewModel.setMaxTokens(it) },
             systemPrompt = systemPrompt,
             onSystemPromptChange = { viewModel.setSystemPrompt(it) },
+            chatMode = chatMode,
+            onChatModeChange = { viewModel.setChatMode(it) },
+            activeProfile = activeProfile,
+            onActiveProfileChange = { viewModel.setActivePromptProfile(it) },
+            profiles = profiles,
+            onProfileSaved = { profile -> viewModel.saveActiveProfile(profile) },
+            onProfileDeleted = { viewModel.deletePromptProfile(it) },
+            onProfileReset = { viewModel.resetPromptProfile(it) },
             themeMode = themeMode,
             onThemeModeChange = { viewModel.setThemeMode(it) },
             thermalState = thermalState,
@@ -281,8 +295,11 @@ fun ChatScreen(viewModel: ChatViewModel) {
                 ChatTopBar(
                     modelTitle = modelTitle,
                     engineState = engineState,
+                    chatMode = chatMode,
+                    activeProfileName = activeProfile.name,
                     onOpenDrawer = { coroutineScope.launch { drawerState.open() } },
                     onOpenModelSelector = { showModelManager = true },
+                    onOpenSettings = { showSettings = true },
                     onNewChat = { viewModel.newChat() }
                 )
             },
@@ -362,8 +379,11 @@ fun ChatScreen(viewModel: ChatViewModel) {
 private fun ChatTopBar(
     modelTitle: String,
     engineState: EngineState,
+    chatMode: UnrestrictedMode,
+    activeProfileName: String,
     onOpenDrawer: () -> Unit,
     onOpenModelSelector: () -> Unit,
+    onOpenSettings: () -> Unit,
     onNewChat: () -> Unit
 ) {
     TopAppBar(
@@ -409,6 +429,11 @@ private fun ChatTopBar(
             }
         },
         actions = {
+            ActiveModeChip(
+                chatMode = chatMode,
+                profileName = activeProfileName,
+                onClick = onOpenSettings
+            )
             IconButton(onClick = onNewChat) {
                 Icon(Icons.Outlined.Edit, contentDescription = "New chat")
             }
@@ -417,6 +442,71 @@ private fun ChatTopBar(
             containerColor = MaterialTheme.colorScheme.background
         )
     )
+}
+
+// ─── Active Inference Mode Chip ─────────────────────────────────────────────
+
+/**
+ * Always-visible indicator of the active Standard/Unrestricted mode plus the
+ * selected prompt profile, so the user can confirm what the model was told
+ * before sending a message. Tapping it opens Settings.
+ */
+@Composable
+private fun ActiveModeChip(
+    chatMode: UnrestrictedMode,
+    profileName: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val isUnrestricted = chatMode == UnrestrictedMode.UNRESTRICTED
+    val containerColor = if (isUnrestricted) {
+        MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.65f)
+    } else {
+        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+    }
+    val contentColor = if (isUnrestricted) {
+        MaterialTheme.colorScheme.onTertiaryContainer
+    } else {
+        MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    Surface(
+        shape = RoundedCornerShape(20.dp),
+        color = containerColor,
+        border = BorderStroke(1.dp, contentColor.copy(alpha = 0.25f)),
+        modifier = modifier
+            .clip(RoundedCornerShape(20.dp))
+            .clickable { onClick() }
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+        ) {
+            Icon(
+                imageVector = if (isUnrestricted) Icons.Default.FlashOn else Icons.Default.Shield,
+                contentDescription = null,
+                modifier = Modifier.size(14.dp),
+                tint = contentColor
+            )
+            Spacer(Modifier.width(4.dp))
+            Text(
+                text = if (isUnrestricted) "Unrestricted" else "Standard",
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = contentColor,
+                maxLines = 1
+            )
+            if (profileName.isNotBlank()) {
+                Spacer(Modifier.width(4.dp))
+                Text(
+                    text = "• $profileName",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = contentColor.copy(alpha = 0.8f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+    }
 }
 
 // ─── ChatGPT Empty State (Welcome View) ────────────────────────────────────
@@ -534,14 +624,22 @@ private fun MessageListView(
 ) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
+    val isUserDragging by listState.interactionSource.collectIsDraggedAsState()
 
     // Follow mode state: user starts in follow mode; manual scroll upward detachment pauses auto-scroll
     var userScrolledAway by remember { mutableStateOf(false) }
 
-    // When user manually scrolls, check if they detached from the bottom
-    LaunchedEffect(listState.isScrollInProgress) {
-        if (listState.isScrollInProgress) {
-            userScrolledAway = listState.canScrollForward
+    // When user drags and there is content below, they detached upward
+    LaunchedEffect(isUserDragging) {
+        if (isUserDragging && listState.canScrollForward) {
+            userScrolledAway = true
+        }
+    }
+
+    // When the list reaches the very bottom, re-engage follow mode automatically
+    LaunchedEffect(listState.canScrollForward) {
+        if (!listState.canScrollForward) {
+            userScrolledAway = false
         }
     }
 
@@ -553,10 +651,13 @@ private fun MessageListView(
         }
     }
 
-    // When generating: auto-scroll ONLY if user is following (not scrolled away!)
+    // When generating: auto-scroll ONLY if user is following (not dragging or scrolled away)
     LaunchedEffect(messages.lastOrNull()?.text?.length) {
-        if (!userScrolledAway && messages.isNotEmpty() && isGenerating) {
-            listState.scrollToItem(messages.lastIndex)
+        if (!userScrolledAway && !isUserDragging && messages.isNotEmpty() && isGenerating) {
+            val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+            if (lastVisible >= messages.lastIndex - 1) {
+                listState.scrollToItem(messages.lastIndex)
+            }
         }
     }
 

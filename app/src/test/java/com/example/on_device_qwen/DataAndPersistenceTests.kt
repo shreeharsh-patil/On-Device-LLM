@@ -30,6 +30,7 @@ import com.example.on_device_qwen.model.ModelFormat
 import com.example.on_device_qwen.model.PromptProfile
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -599,13 +600,15 @@ class DataAndPersistenceTests {
         val largeFile = createValidGgufFile(tempFolder.newFile("cancel_src.bin"), sizeBytes = 1024 * 1024)
         val cancelUri = SafTestContentProvider.registerFile("/cancel", largeFile, "cancelled.gguf", largeFile.length())
         val startedCopying = CompletableDeferred<Unit>()
+        val cancelLatch = java.util.concurrent.CountDownLatch(1)
         var caughtCancel = false
 
-        val job = launch {
+        val job = launch(Dispatchers.Default) {
             try {
                 modelRepo.importModelWithState(cancelUri) { state ->
                     if (state.progress == ImportProgress.COPYING && state.bytesCopied > 0L) {
                         startedCopying.complete(Unit)
+                        cancelLatch.await(5, java.util.concurrent.TimeUnit.SECONDS)
                     }
                 }
             } catch (ce: CancellationException) {
@@ -615,6 +618,7 @@ class DataAndPersistenceTests {
         }
         startedCopying.await()
         job.cancel()
+        cancelLatch.countDown()
         job.join()
 
         assertTrue("CancellationException must propagate cleanly", caughtCancel)

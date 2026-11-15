@@ -53,24 +53,6 @@ fun ModelManagerDialog(
         }
     }
 
-    modelPendingDeletion?.let { candidate ->
-        AlertDialog(
-            onDismissRequest = { modelPendingDeletion = null },
-            title = { Text("Remove local model?") },
-            text = { Text("Remove " + candidate.name + " from the app? App-owned model files will be deleted. Files outside app storage will only be unregistered.") },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        onDeleteModel(candidate)
-                        modelPendingDeletion = null
-                    },
-                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
-                ) { Text("Remove model") }
-            },
-            dismissButton = { TextButton(onClick = { modelPendingDeletion = null }) { Text("Cancel") } }
-        )
-    }
-
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)
@@ -409,6 +391,23 @@ fun ModelManagerDialog(
                 }
             }
         }
+    }
+    modelPendingDeletion?.let { candidate ->
+        AlertDialog(
+            onDismissRequest = { modelPendingDeletion = null },
+            title = { Text("Remove local model?") },
+            text = { Text("Remove " + candidate.name + " from the app? App-owned model files will be deleted. Files outside app storage will only be unregistered.") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onDeleteModel(candidate)
+                        modelPendingDeletion = null
+                    },
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
+                ) { Text("Remove model") }
+            },
+            dismissButton = { TextButton(onClick = { modelPendingDeletion = null }) { Text("Cancel") } }
+        )
     }
 }
 

@@ -18,6 +18,9 @@ val hasReleaseSigning = listOf(
     releaseKeyAlias,
     releaseKeyPassword
 ).all { !it.isNullOrBlank() }
+val allowUnsignedRelease = providers.gradleProperty("allowUnsignedRelease")
+    .map { it.equals("true", ignoreCase = true) }
+    .getOrElse(false)
 
 
 android {
@@ -27,15 +30,11 @@ android {
     defaultConfig {
         applicationId = "com.example.on_device_qwen"
         minSdk = 26
-        targetSdk = 35
+        targetSdk = 36
         versionCode = 7
         versionName = "1.3.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-
-        ndk {
-            abiFilters.addAll(listOf("arm64-v8a", "x86_64"))
-        }
 
         externalNativeBuild {
             cmake {
@@ -79,8 +78,21 @@ android {
     }
 
     buildTypes {
+        debug {
+            ndk {
+                abiFilters.addAll(listOf("arm64-v8a", "x86_64"))
+            }
+        }
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "src/main/keepRules/rules.keep"
+            )
+            ndk {
+                abiFilters.add("arm64-v8a")
+            }
             if (hasReleaseSigning) {
                 signingConfig = signingConfigs.getByName("release")
             }
@@ -94,6 +106,11 @@ android {
     buildFeatures {
         compose = true
     }
+    testOptions {
+        unitTests {
+            isIncludeAndroidResources = true
+        }
+    }
     externalNativeBuild {
         cmake {
             path = file("src/main/cpp/CMakeLists.txt")
@@ -105,6 +122,30 @@ android {
 kotlin {
     compilerOptions {
         jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_11)
+    }
+}
+
+val configuredReleaseKeystorePath = releaseKeystorePath?.let { file(it).absolutePath }
+val missingReleaseSigning = !hasReleaseSigning && !allowUnsignedRelease
+
+tasks.configureEach {
+    if (name == "preReleaseBuild" || name == "packageRelease" || name == "bundleRelease") {
+        val localMissingSigning = missingReleaseSigning
+        val localKeystorePath = configuredReleaseKeystorePath
+        doFirst {
+            if (localMissingSigning) {
+                throw GradleException(
+                    "Release build requires ANDROID_KEYSTORE_PATH, ANDROID_KEYSTORE_PASSWORD, " +
+                        "ANDROID_KEY_ALIAS, and ANDROID_KEY_PASSWORD. Pass -PallowUnsignedRelease=true " +
+                        "only for CI verification builds."
+                )
+            }
+            if (localKeystorePath != null && !File(localKeystorePath).isFile) {
+                throw GradleException(
+                    "ANDROID_KEYSTORE_PATH points to a missing file: $localKeystorePath"
+                )
+            }
+        }
     }
 }
 
@@ -123,6 +164,7 @@ dependencies {
     implementation(libs.compose.material.icons.extended)
     implementation(libs.compose.animation)
     implementation(libs.compose.foundation)
+    implementation(libs.coil.compose)
     debugImplementation(libs.compose.ui.tooling)
 
     // Activity & Lifecycle
@@ -136,6 +178,12 @@ dependencies {
 
     // Test
     testImplementation(libs.junit)
+    testImplementation(libs.kotlinx.coroutines.test)
+    testImplementation(libs.robolectric)
+    testImplementation(libs.androidx.test.core.ktx)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
+    androidTestImplementation(platform(libs.compose.bom))
+    androidTestImplementation(libs.compose.ui.test.junit4)
+    debugImplementation(libs.compose.ui.test.manifest)
 }

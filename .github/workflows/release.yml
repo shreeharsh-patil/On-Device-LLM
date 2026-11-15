@@ -34,8 +34,20 @@ jobs:
       - name: Accept Android SDK Licenses
         run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
 
+      - name: Ensure No Keystore Files Are Tracked
+        run: |
+          TRACKED_SECRETS=$(git ls-files '*.keystore' '*.jks' '*.p12' '*.pk8' '*.pem' 'keystore.properties')
+          if [ -n "$TRACKED_SECRETS" ]; then
+            echo "::error::Tracked private signing files found in Git history/tree:"
+            echo "$TRACKED_SECRETS"
+            exit 1
+          fi
+
       - name: Run Unit Tests
-        run: ./gradlew testDebugUnitTest --no-daemon
+        run: ./gradlew testDebugUnitTest --no-daemon --stacktrace
+
+      - name: Run Android Lint
+        run: ./gradlew lintDebug --no-daemon --stacktrace
 
       - name: Restore release signing key
         env:

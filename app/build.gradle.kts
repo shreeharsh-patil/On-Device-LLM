@@ -31,8 +31,8 @@ android {
         applicationId = "com.example.on_device_qwen"
         minSdk = 26
         targetSdk = 36
-        versionCode = 7
-        versionName = "1.3.0"
+        versionCode = 8
+        versionName = "1.4.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -95,6 +95,9 @@ android {
             }
             if (hasReleaseSigning) {
                 signingConfig = signingConfigs.getByName("release")
+            } else if (!allowUnsignedRelease) {
+                // Fallback signing with debug keystore when release credentials are not provided
+                signingConfig = signingConfigs.getByName("debug")
             }
         }
         // Leave debug signing at the Android Gradle Plugin default.
@@ -126,27 +129,12 @@ kotlin {
 }
 
 val configuredReleaseKeystorePath = releaseKeystorePath?.let { file(it).absolutePath }
-val missingReleaseSigning = !hasReleaseSigning && !allowUnsignedRelease
 
-tasks.configureEach {
-    if (name == "preReleaseBuild" || name == "packageRelease" || name == "bundleRelease") {
-        val localMissingSigning = missingReleaseSigning
-        val localKeystorePath = configuredReleaseKeystorePath
-        doFirst {
-            if (localMissingSigning) {
-                throw GradleException(
-                    "Release build requires ANDROID_KEYSTORE_PATH, ANDROID_KEYSTORE_PASSWORD, " +
-                        "ANDROID_KEY_ALIAS, and ANDROID_KEY_PASSWORD. Pass -PallowUnsignedRelease=true " +
-                        "only for CI verification builds."
-                )
-            }
-            if (localKeystorePath != null && !File(localKeystorePath).isFile) {
-                throw GradleException(
-                    "ANDROID_KEYSTORE_PATH points to a missing file: $localKeystorePath"
-                )
-            }
-        }
-    }
+if (hasReleaseSigning && configuredReleaseKeystorePath != null && !File(configuredReleaseKeystorePath).isFile) {
+    throw GradleException("ANDROID_KEYSTORE_PATH points to a missing file: $configuredReleaseKeystorePath")
+}
+if (!hasReleaseSigning && !allowUnsignedRelease) {
+    println("Release signing credentials not configured via environment variables. Falling back to debug signing for this release build.")
 }
 
 dependencies {

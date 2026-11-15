@@ -1,5 +1,23 @@
 # R8 / ProGuard keep rules for Uncensored AI (on_device_qwen)
 
+# General attributes for Kotlin reflection, type signatures, and annotations
+-keepattributes *Annotation*,Signature,InnerClasses,EnclosingMethod
+
+# Kotlin reflection and metadata preservation
+-keep class kotlin.Metadata { *; }
+-keepclassmembers class kotlin.Metadata { *; }
+-dontwarn kotlin.reflect.**
+-keep class kotlin.reflect.** { *; }
+-keepclassmembers enum * {
+    public static **[] values();
+    public static ** valueOf(java.lang.String);
+}
+
+# Preserve native methods across all classes
+-keepclasseswithmembernames class * {
+    native <methods>;
+}
+
 # Keep JNI entry points and token-streaming callback registered by JNI_OnLoad in libdolphin_gguf.so
 -keep class com.example.on_device_qwen.inference.DolphinNativeEngine {
     <init>(...);
@@ -11,11 +29,19 @@
 -keep class * implements com.example.on_device_qwen.inference.ChunkListener {
     public boolean onBytes(byte[]);
 }
+-keep class com.example.on_device_qwen.inference.** { *; }
 
 # LiteRT-LM AAR does not ship consumer proguard rules; preserve JNI bridge, callbacks, and benchmark/reflection types
 -keep class com.google.ai.edge.litertlm.** { *; }
 -dontwarn com.google.ai.edge.litertlm.**
 
-# Preserve model classes and data helpers
+# Preserve domain engines and interfaces
+-keep class com.example.on_device_qwen.domain.engine.** { *; }
+
+# Preserve model classes, entities, and data helpers (serialization & SQLite reflection)
 -keep class com.example.on_device_qwen.model.** { *; }
+-keepclassmembers class com.example.on_device_qwen.model.** { *; }
+-keep class com.example.on_device_qwen.data.** { *; }
 -keepclassmembers class com.example.on_device_qwen.data.** { *; }
+-keep class com.example.on_device_qwen.domain.modelmanager.** { *; }
+-keepclassmembers class com.example.on_device_qwen.domain.modelmanager.** { *; }

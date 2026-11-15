@@ -399,7 +399,7 @@ fun ModelManagerDialog(
                                         ) {
                                             Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(16.dp))
                                             Spacer(Modifier.width(4.dp))
-                                            Text("Download", fontSize = 12.sp)
+                                            Text("Open download", fontSize = 12.sp)
                                         }
                                     }
                                 }

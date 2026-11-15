@@ -187,7 +187,7 @@ fun ChatScreen(viewModel: ChatViewModel) {
             onImportUri = { uri ->
                 viewModel.importModel(uri)
             },
-            onDeleteModel = {},
+            onDeleteModel = { model -> viewModel.deleteModel(model) },
             onDismiss = { showModelManager = false }
         )
     }

@@ -6,8 +6,12 @@
    See https://developer.android.com/about/versions/12/backup-restore
 -->
 <full-backup-content>
-    <!--
-   <include domain="sharedpref" path="."/>
-   <exclude domain="sharedpref" path="device.xml"/>
--->
+    <exclude domain="database" path="qwen_chat.db" />
+    <exclude domain="database" path="qwen_chat.db-wal" />
+    <exclude domain="database" path="qwen_chat.db-shm" />
+    <exclude domain="database" path="qwen_chat.db-journal" />
+    <exclude domain="sharedpref" path="on_device_qwen_prefs.xml" />
+    <exclude domain="file" path="models" />
+    <exclude domain="root" path="cache" />
+    <exclude domain="root" path="code_cache" />
 </full-backup-content>

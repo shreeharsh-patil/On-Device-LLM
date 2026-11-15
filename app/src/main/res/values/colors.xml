@@ -1,10 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="purple_200">#FFBB86FC</color>
-    <color name="purple_500">#FF6200EE</color>
-    <color name="purple_700">#FF3700B3</color>
-    <color name="teal_200">#FF03DAC5</color>
-    <color name="teal_700">#FF018786</color>
+    <!-- Obsidian & Vellum — Sovereign Silicon -->
+    <color name="vellum_canvas">#FFFAF9F6</color>
+    <color name="obsidian_canvas">#FF0B0C0F</color>
+    <color name="sovereign_cyan_light">#FF0369A1</color>
+    <color name="sovereign_cyan_dark">#FF38BDF8</color>
+    <color name="sovereign_on_cyan_dark">#FF06151E</color>
+    <color name="ink_dark">#FF121316</color>
+    <color name="ink_light">#FFF1F2F4</color>
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
 </resources>

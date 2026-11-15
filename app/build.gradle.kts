@@ -18,6 +18,9 @@ val hasReleaseSigning = listOf(
     releaseKeyAlias,
     releaseKeyPassword
 ).all { !it.isNullOrBlank() }
+val allowUnsignedRelease = providers.gradleProperty("allowUnsignedRelease")
+    .map { it.equals("true", ignoreCase = true) }
+    .getOrElse(false)
 
 
 android {
@@ -27,15 +30,11 @@ android {
     defaultConfig {
         applicationId = "com.example.on_device_qwen"
         minSdk = 26
-        targetSdk = 35
-        versionCode = 7
-        versionName = "1.3.0"
+        targetSdk = 36
+        versionCode = 8
+        versionName = "1.4.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-
-        ndk {
-            abiFilters.addAll(listOf("arm64-v8a", "x86_64"))
-        }
 
         externalNativeBuild {
             cmake {
@@ -79,10 +78,26 @@ android {
     }
 
     buildTypes {
+        debug {
+            ndk {
+                abiFilters.addAll(listOf("arm64-v8a", "x86_64"))
+            }
+        }
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "src/main/keepRules/rules.keep"
+            )
+            ndk {
+                abiFilters.add("arm64-v8a")
+            }
             if (hasReleaseSigning) {
                 signingConfig = signingConfigs.getByName("release")
+            } else if (!allowUnsignedRelease) {
+                // Fallback signing with debug keystore when release credentials are not provided
+                signingConfig = signingConfigs.getByName("debug")
             }
         }
         // Leave debug signing at the Android Gradle Plugin default.
@@ -93,6 +108,11 @@ android {
     }
     buildFeatures {
         compose = true
+    }
+    testOptions {
+        unitTests {
+            isIncludeAndroidResources = true
+        }
     }
     externalNativeBuild {
         cmake {
@@ -106,6 +126,15 @@ kotlin {
     compilerOptions {
         jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_11)
     }
+}
+
+val configuredReleaseKeystorePath = releaseKeystorePath?.let { file(it).absolutePath }
+
+if (hasReleaseSigning && configuredReleaseKeystorePath != null && !File(configuredReleaseKeystorePath).isFile) {
+    throw GradleException("ANDROID_KEYSTORE_PATH points to a missing file: $configuredReleaseKeystorePath")
+}
+if (!hasReleaseSigning && !allowUnsignedRelease) {
+    println("Release signing credentials not configured via environment variables. Falling back to debug signing for this release build.")
 }
 
 dependencies {
@@ -123,6 +152,7 @@ dependencies {
     implementation(libs.compose.material.icons.extended)
     implementation(libs.compose.animation)
     implementation(libs.compose.foundation)
+    implementation(libs.coil.compose)
     debugImplementation(libs.compose.ui.tooling)
 
     // Activity & Lifecycle
@@ -136,6 +166,12 @@ dependencies {
 
     // Test
     testImplementation(libs.junit)
+    testImplementation(libs.kotlinx.coroutines.test)
+    testImplementation(libs.robolectric)
+    testImplementation(libs.androidx.test.core.ktx)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
+    androidTestImplementation(platform(libs.compose.bom))
+    androidTestImplementation(libs.compose.ui.test.junit4)
+    debugImplementation(libs.compose.ui.test.manifest)
 }

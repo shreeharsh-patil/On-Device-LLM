@@ -38,19 +38,53 @@ jobs:
       - name: Accept Android SDK Licenses
         run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
 
+      - name: Ensure No Keystore Files Are Tracked
+        run: |
+          TRACKED_SECRETS=$(git ls-files '*.keystore' '*.jks' '*.p12' '*.pk8' '*.pem' 'keystore.properties')
+          if [ -n "$TRACKED_SECRETS" ]; then
+            echo "::error::Tracked private signing files found in Git history/tree:"
+            echo "$TRACKED_SECRETS"
+            exit 1
+          fi
+
       - name: Run Unit Tests
         run: ./gradlew testDebugUnitTest --no-daemon --stacktrace
 
-      - name: Compile Kotlin & Compose
-        run: ./gradlew compileDebugKotlin --no-daemon --stacktrace
+      - name: Run Android Lint
+        run: ./gradlew lintDebug --no-daemon --stacktrace
 
       - name: Build Debug APK
         run: ./gradlew assembleDebug --no-daemon --stacktrace
 
-      - name: Verify APK Generated
+      - name: Build Unsigned Release APK (R8 Verification)
+        run: ./gradlew assembleRelease -PallowUnsignedRelease=true --no-daemon --stacktrace
+
+      - name: Verify APKs Generated
         run: |
           ls -la app/build/outputs/apk/debug/
+          ls -la app/build/outputs/apk/release/
           test -f app/build/outputs/apk/debug/app-debug.apk || exit 1
+          test -f app/build/outputs/apk/release/app-release-unsigned.apk || exit 1
+
+      - name: Upload Unit Test Reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-reports
+          path: |
+            app/build/reports/tests/testDebugUnitTest/
+            app/build/test-results/testDebugUnitTest/
+          retention-days: 14
+
+      - name: Upload Lint Reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-reports
+          path: |
+            app/build/reports/lint-results-debug.xml
+            app/build/reports/lint-results-debug.html
+          retention-days: 14
 
       - name: Upload Debug APK Artifact
         uses: actions/upload-artifact@v4

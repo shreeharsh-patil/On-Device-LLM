@@ -1,35 +1,77 @@
 package com.example.on_device_qwen
 
-import com.example.on_device_qwen.domain.engine.GgufMetadataParser
-import com.example.on_device_qwen.domain.engine.InferenceEngineFactory
+import android.content.Context
+import androidx.test.core.app.ApplicationProvider
+import com.example.on_device_qwen.domain.modelmanager.ModelRepository
 import com.example.on_device_qwen.model.EngineType
+import com.example.on_device_qwen.model.ModelCompatibilityStatus
 import com.example.on_device_qwen.model.ModelErrorCode
-import org.junit.Assert.*
+import com.example.on_device_qwen.model.ModelFormat
+import com.example.on_device_qwen.model.ModelMetadata
+import com.example.on_device_qwen.model.Modality
+import kotlinx.coroutines.runBlocking
+import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 import java.io.File
 import java.io.FileOutputStream
-import java.io.RandomAccessFile
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.security.MessageDigest
 
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [34])
 class ModelDiscoveryAndRecoveryTests {
 
     @get:Rule
     val tempFolder = TemporaryFolder()
 
-    private fun createDummyGgufFile(dir: File, name: String, sizeBytes: Long = 2048): File {
+    private lateinit var context: Context
+    private lateinit var repository: ModelRepository
+
+    @Before
+    fun setUp() {
+        context = ApplicationProvider.getApplicationContext()
+        repository = ModelRepository(context)
+    }
+
+    @After
+    fun tearDown() {
+        File(context.filesDir, "models").deleteRecursively()
+        context.filesDir.listFiles()?.forEach {
+            if (it.isFile) it.delete()
+        }
+    }
+
+    private fun createDummyGgufFile(
+        dir: File,
+        name: String,
+        sizeBytes: Long = 2048,
+        version: Int = 3,
+        tensorCount: Long = 1L,
+    ): File {
         val file = File(dir, name)
         FileOutputStream(file).use { stream ->
-            // GGUF Magic: 'G', 'G', 'U', 'F'
-            stream.write(byteArrayOf('G'.code.toByte(), 'G'.code.toByte(), 'U'.code.toByte(), 'F'.code.toByte()))
-            // Version 3
-            stream.write(byteArrayOf(3, 0, 0, 0))
-            // Tensor count: 0
-            stream.write(ByteArray(8))
-            // Metadata count: 0
-            stream.write(ByteArray(8))
-            // Pad remaining bytes
-            val remaining = (sizeBytes - 24).toInt()
+            val header = ByteBuffer.allocate(24).order(ByteOrder.LITTLE_ENDIAN).apply {
+                put('G'.code.toByte())
+                put('G'.code.toByte())
+                put('U'.code.toByte())
+                put('F'.code.toByte())
+                putInt(version)
+                putLong(tensorCount)
+                putLong(0L)
+            }.array()
+            stream.write(header)
+            val remaining = (sizeBytes - header.size).toInt()
             if (remaining > 0) {
                 stream.write(ByteArray(remaining))
             }
@@ -37,10 +79,21 @@ class ModelDiscoveryAndRecoveryTests {
         return file
     }
 
-    private fun createDummyLiteRtFile(dir: File, name: String, sizeBytes: Long = 2048): File {
+    private fun createDummyLiteRtLmFile(dir: File, name: String, sizeBytes: Long = 2048): File {
         val file = File(dir, name)
         FileOutputStream(file).use { stream ->
-            // 4 bytes offset, then 'T', 'F', 'L', '3'
+            stream.write("LITERTLM".toByteArray(Charsets.US_ASCII))
+            val remaining = (sizeBytes - 8).toInt()
+            if (remaining > 0) {
+                stream.write(ByteArray(remaining))
+            }
+        }
+        return file
+    }
+
+    private fun createDummyTfl3File(dir: File, name: String, sizeBytes: Long = 2048): File {
+        val file = File(dir, name)
+        FileOutputStream(file).use { stream ->
             stream.write(byteArrayOf(0x18, 0x00, 0x00, 0x00))
             stream.write(byteArrayOf('T'.code.toByte(), 'F'.code.toByte(), 'L'.code.toByte(), '3'.code.toByte()))
             val remaining = (sizeBytes - 8).toInt()
@@ -53,131 +106,135 @@ class ModelDiscoveryAndRecoveryTests {
 
     @Test
     fun testGgufMagicHeaderDetection() {
-        val root = tempFolder.newFolder("downloads")
+        val root = tempFolder.newFolder("models")
         val ggufFile = createDummyGgufFile(root, "qwen2.5-1.5b-chat.gguf")
-
-        val raf = RandomAccessFile(ggufFile, "r")
-        val header = ByteArray(4)
-        raf.readFully(header)
-        raf.close()
-
-        val isGguf = header.contentEquals(byteArrayOf('G'.code.toByte(), 'G'.code.toByte(), 'U'.code.toByte(), 'F'.code.toByte()))
-        assertTrue("Header should match GGUF magic", isGguf)
+        assertTrue("Header should match GGUF magic", repository.isGgufBinary(ggufFile))
     }
 
     @Test
-    fun testLiteRtTfl3MagicHeaderDetection() {
+    fun testLiteRtAndTfl3MagicHeaderDetection() {
         val root = tempFolder.newFolder("litert_models")
-        val liteRtFile = createDummyLiteRtFile(root, "qwen2.5-0.5b.litertlm")
+        val liteRtLmFile = createDummyLiteRtLmFile(root, "qwen2.5-0.5b.litertlm")
+        val tfliteFile = createDummyTfl3File(root, "gemma-1b.tflite")
 
-        val raf = RandomAccessFile(liteRtFile, "r")
-        val header = ByteArray(8)
-        raf.readFully(header)
-        raf.close()
-
-        val isTfl3 = header.sliceArray(4 until 8).contentEquals(
-            byteArrayOf('T'.code.toByte(), 'F'.code.toByte(), 'L'.code.toByte(), '3'.code.toByte())
-        )
-        assertTrue("Header should match TFL3 magic at offset 4", isTfl3)
+        assertTrue("LITERTLM header must be detected", repository.isLiteRtBinary(liteRtLmFile))
+        assertTrue("TFL3 header must be detected", repository.isLiteRtBinary(tfliteFile))
     }
 
     @Test
     fun testExtensionlessModelDetectionViaMagic() {
         val root = tempFolder.newFolder("custom_store")
-        // File saved without extension or with .bin
         val binFile = createDummyGgufFile(root, "model_cache.bin")
-
-        val raf = RandomAccessFile(binFile, "r")
-        val header = ByteArray(4)
-        raf.readFully(header)
-        raf.close()
-
-        val isGguf = header.contentEquals(byteArrayOf('G'.code.toByte(), 'G'.code.toByte(), 'U'.code.toByte(), 'F'.code.toByte()))
-        assertTrue("Extensionless or .bin file with GGUF header must be recognized", isGguf)
+        assertTrue("Extensionless or .bin file with GGUF header must be recognized", repository.isGgufBinary(binFile))
+        assertTrue("Candidate check should accept valid magic header", repository.isCandidateModelFile(binFile))
     }
 
     @Test
     fun testIncompleteDownloadFiltering() {
         val root = tempFolder.newFolder("partial_downloads")
-        val partial1 = File(root, "qwen.gguf.crdownload").apply { writeText("in progress...") }
-        val partial2 = File(root, "qwen.gguf.part").apply { writeText("in progress...") }
-        val partial3 = File(root, "qwen.gguf.download").apply { writeText("in progress...") }
-        val partial4 = File(root, "qwen.gguf.tmp").apply { writeText("in progress...") }
+        val partial1 = File(root, "qwen.gguf.crdownload").apply { writeBytes(ByteArray(1024)) }
+        val partial2 = File(root, "qwen.gguf.part").apply { writeBytes(ByteArray(1024)) }
+        val partial3 = File(root, "qwen.gguf.download").apply { writeBytes(ByteArray(1024)) }
+        val partial4 = File(root, ".qwen.gguf.tmp").apply { writeBytes(ByteArray(1024)) }
         val complete = createDummyGgufFile(root, "qwen.gguf")
 
-        val allFiles = root.listFiles()?.toList() ?: emptyList()
-        val validFiles = allFiles.filterNot { file ->
-            val name = file.name.lowercase()
-            name.endsWith(".crdownload") || name.endsWith(".part") ||
-                    name.endsWith(".download") || name.endsWith(".tmp")
-        }
-
-        assertEquals(1, validFiles.size)
-        assertEquals(complete.name, validFiles.first().name)
+        assertFalse(repository.isCandidateModelFile(partial1))
+        assertFalse(repository.isCandidateModelFile(partial2))
+        assertFalse(repository.isCandidateModelFile(partial3))
+        assertFalse(repository.isCandidateModelFile(partial4))
+        assertTrue(repository.isCandidateModelFile(complete))
     }
 
     @Test
-    fun testRecursiveSubdirectoryTraversal() {
-        val root = tempFolder.newFolder("public_downloads")
-        val sub1 = File(root, "browser").apply { mkdirs() }
-        val sub2 = File(root, "telegram/documents").apply { mkdirs() }
-        val hiddenDir = File(root, ".hidden_cache").apply { mkdirs() }
-
-        val model1 = createDummyGgufFile(root, "model1.gguf")
-        val model2 = createDummyGgufFile(sub1, "model2.gguf")
-        val model3 = createDummyLiteRtFile(sub2, "model3.litertlm")
-        val ignoredHiddenModel = createDummyGgufFile(hiddenDir, "ignored.gguf")
-
-        val discovered = mutableListOf<File>()
-
-        fun scanRecursive(dir: File, depth: Int = 0) {
-            if (depth > 3 || !dir.isDirectory || dir.name.startsWith(".")) return
-            dir.listFiles()?.forEach { file ->
-                if (file.isDirectory && !file.name.startsWith(".")) {
-                    scanRecursive(file, depth + 1)
-                } else if (file.isFile && (file.name.endsWith(".gguf") || file.name.endsWith(".litertlm"))) {
-                    discovered.add(file)
-                }
-            }
+    fun testCorruptHeadersFlaggedInsteadOfFabricated() {
+        val root = tempFolder.newFolder("corrupt_models")
+        val badGguf = File(root, "bad_header.gguf").apply {
+            writeBytes("NOT_A_VALID_GGUF_MODEL_FILE_1234567890".toByteArray())
+        }
+        val badVersionGguf = createDummyGgufFile(root, "bad_ver.gguf", version = 99)
+        val badLiteRt = File(root, "html_404.litertlm").apply {
+            writeText("<html><body>404 Not Found</body></html>")
         }
 
-        scanRecursive(root)
+        val badGgufMeta = repository.parseMetadata(badGguf)
+        val badVersionMeta = repository.parseMetadata(badVersionGguf)
+        val badLiteRtMeta = repository.parseMetadata(badLiteRt)
 
-        assertEquals(3, discovered.size)
-        val names = discovered.map { it.name }.toSet()
-        assertTrue(names.contains("model1.gguf"))
-        assertTrue(names.contains("model2.gguf"))
-        assertTrue(names.contains("model3.litertlm"))
-        assertFalse(names.contains("ignored.gguf"))
+        assertNotNull(badGgufMeta)
+        assertTrue(badGgufMeta!!.isCorrupted)
+        assertEquals(ModelCompatibilityStatus.CORRUPTED, badGgufMeta.compatibilityStatus)
+
+        assertNotNull(badVersionMeta)
+        assertTrue(badVersionMeta!!.isCorrupted)
+        assertEquals(ModelCompatibilityStatus.CORRUPTED, badVersionMeta.compatibilityStatus)
+
+        assertNotNull(badLiteRtMeta)
+        assertTrue(badLiteRtMeta!!.isCorrupted)
+        assertEquals(ModelCompatibilityStatus.CORRUPTED, badLiteRtMeta.compatibilityStatus)
     }
 
     @Test
-    fun testDuplicateImportPrevention() {
-        val internalFilesDir = tempFolder.newFolder("internal_files")
-        val externalDownload = tempFolder.newFolder("download")
+    fun testLiteRtMetadataDoesNotInferVisionFromFilename() {
+        val root = tempFolder.newFolder("vl_name_test")
+        val fakeVlModel = createDummyLiteRtLmFile(root, "qwen2-vl-vision-1.5b.litertlm")
+        val meta = repository.parseMetadata(fakeVlModel)
 
-        val downloadedFile = createDummyGgufFile(externalDownload, "Qwen2.5-Coder-1.5B.gguf", sizeBytes = 1024 * 1024)
-        val alreadyImported = File(internalFilesDir, downloadedFile.name).apply {
-            writeBytes(downloadedFile.readBytes())
-        }
-
-        // Simulate duplicate check logic:
-        // If destination exists and matches length, skip copying
-        val shouldSkipCopy = alreadyImported.exists() && alreadyImported.length() == downloadedFile.length()
-        assertTrue("Should skip copying duplicate multi-gigabyte files", shouldSkipCopy)
+        assertNotNull(meta)
+        assertFalse(meta!!.isCorrupted)
+        assertFalse("Must not guess hasVision=true solely from filename", meta.hasVision)
+        assertEquals(setOf(Modality.TEXT), meta.supportedModalities)
     }
 
     @Test
-    fun testEngineTypeResolution() {
-        val ggufFile = File("/mock/path/qwen.gguf")
-        val litertFile = File("/mock/path/qwen.litertlm")
-        val taskFile = File("/mock/path/model.task")
-        val tfliteFile = File("/mock/path/model.tflite")
+    fun testEvaluateDeviceCompatibilityClampsLargeContextEstimate() {
+        val modelFile = File(tempFolder.root, "qwen2.5-1.5b.gguf")
+        val metadata = ModelMetadata(
+            file = modelFile,
+            name = "Qwen 2.5 1.5B",
+            format = ModelFormat.GGUF,
+            engineType = EngineType.LLAMA_CPP,
+            contextLength = 131072, // 128K metadata context that previously produced ~114 GB KV estimates
+            fileSizeBytes = 1000L * 1024L * 1024L, // ~1000 MB
+        )
 
-        assertTrue("gguf must use LLAMA_CPP", ggufFile.name.endsWith(".gguf"))
-        assertTrue("litertlm must use LiteRT", litertFile.name.endsWith(".litertlm"))
-        assertTrue("task must use LiteRT", taskFile.name.endsWith(".task"))
-        assertTrue("tflite must use LiteRT", tfliteFile.name.endsWith(".tflite"))
+        val compatible = repository.evaluateDeviceCompatibility(
+            metadata = metadata,
+            availRamMb = 4096L,
+            totalRamMb = 8192L,
+        )
+        assertEquals(ModelCompatibilityStatus.COMPATIBLE, compatible.compatibilityStatus)
+        assertTrue(
+            "Clamped KV estimate must remain bounded for mobile instead of 100+ GB",
+            compatible.estimatedKvRamMb in 48L..768L,
+        )
+
+        val tight = repository.evaluateDeviceCompatibility(
+            metadata = metadata,
+            availRamMb = 1400L,
+            totalRamMb = 4096L,
+        )
+        assertEquals(ModelCompatibilityStatus.TIGHT_RAM, tight.compatibilityStatus)
+
+        val insufficient = repository.evaluateDeviceCompatibility(
+            metadata = metadata,
+            availRamMb = 800L,
+            totalRamMb = 2048L,
+        )
+        assertEquals(ModelCompatibilityStatus.INSUFFICIENT_RAM, insufficient.compatibilityStatus)
+    }
+
+    @Test
+    fun testComputeSha256MatchesExpectedDigest() = runBlocking {
+        val root = tempFolder.newFolder("hash_test")
+        val file = createDummyGgufFile(root, "hashable.gguf", sizeBytes = 4096)
+        val actual = repository.computeSha256(file)
+        val expected = MessageDigest.getInstance("SHA-256")
+            .digest(file.readBytes())
+            .joinToString("") { "%02x".format(it) }
+
+        assertNotNull(actual)
+        assertEquals(64, actual!!.length)
+        assertEquals(expected, actual)
     }
 
     @Test
@@ -190,19 +247,5 @@ class ModelDiscoveryAndRecoveryTests {
         assertNotNull(ModelErrorCode.INSUFFICIENT_RAM)
         assertNotNull(ModelErrorCode.MODEL_INITIALIZATION_FAILED)
         assertNotNull(ModelErrorCode.INFERENCE_FAILED)
-    }
-
-    @Test
-    fun testCorruptedSmallFileFilter() {
-        val root = tempFolder.newFolder("models")
-        val tinyFile = File(root, "truncated.gguf").apply { writeBytes(byteArrayOf(1, 2, 3)) }
-        val normalFile = createDummyGgufFile(root, "valid.gguf", sizeBytes = 2 * 1024 * 1024)
-
-        val minValidSize = 1024 * 1024L
-        val isTinyValid = tinyFile.length() >= minValidSize
-        val isNormalValid = normalFile.length() >= minValidSize
-
-        assertFalse("Small/truncated file (< 1MB) should be filtered", isTinyValid)
-        assertTrue("Valid model file should pass size check", isNormalValid)
     }
 }

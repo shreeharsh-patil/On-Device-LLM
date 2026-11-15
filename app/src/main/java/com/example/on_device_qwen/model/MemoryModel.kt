@@ -24,7 +24,17 @@ data class MemoryItem(
     val confidence: Float = 1.0f,
     val keywords: String = "",
     val isPinned: Boolean = false
-)
+) {
+    /** Strips chat-template delimiter tokens before prompt injection. */
+    fun sanitizedContent(): String = content
+        .replace("<|im_start|>", "")
+        .replace("<|im_end|>", "")
+        .replace("<|endoftext|>", "")
+        .replace("<|eot_id|>", "")
+        .replace("<start_of_turn>", "")
+        .replace("<end_of_turn>", "")
+        .trim()
+}
 
 /**
  * Represents a summarized representation of older conversation turns.
@@ -53,6 +63,12 @@ data class RetrievedMemoryContext(
 interface IMemoryRepository {
     suspend fun saveMemory(item: MemoryItem): Long
     suspend fun updateMemory(id: String, newContent: String, category: MemoryCategory? = null): Int
+    suspend fun updateMemoryWithKeywords(
+        id: String,
+        newContent: String,
+        keywords: String,
+        category: MemoryCategory? = null,
+    ): Int = updateMemory(id, newContent, category)
     suspend fun deleteMemory(id: String): Int
     suspend fun clearAllMemories(): Int
     suspend fun getAllMemories(): List<MemoryItem>

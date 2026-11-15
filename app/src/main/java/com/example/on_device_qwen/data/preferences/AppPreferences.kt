@@ -24,29 +24,54 @@ enum class PerformanceMode(val displayName: String, val description: String) {
 class AppPreferences(context: Context) : com.example.on_device_qwen.model.IMemoryPreferences, com.example.on_device_qwen.model.IChatModePreferences {
 
     private val prefs: SharedPreferences = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    private val modelPathsLock = Any()
+    private val promptProfilesLock = Any()
 
     var activeModelPath: String?
-        get() = prefs.getString(KEY_ACTIVE_MODEL_PATH, null)
-        set(value) = prefs.edit().putString(KEY_ACTIVE_MODEL_PATH, value).apply()
+        get() = synchronized(modelPathsLock) { prefs.getString(KEY_ACTIVE_MODEL_PATH, null) }
+        set(value) = synchronized(modelPathsLock) {
+            prefs.edit().putString(KEY_ACTIVE_MODEL_PATH, value).apply()
+        }
 
     var registeredModelPaths: Set<String>
-        get() = prefs.getStringSet(KEY_REGISTERED_MODEL_PATHS, emptySet()) ?: emptySet()
-        set(value) = prefs.edit().putStringSet(KEY_REGISTERED_MODEL_PATHS, value).apply()
+        get() = synchronized(modelPathsLock) {
+            // Return an immutable defensive copy because SharedPreferences.getStringSet may reuse internal sets.
+            (prefs.getStringSet(KEY_REGISTERED_MODEL_PATHS, emptySet()) ?: emptySet()).toSet()
+        }
+        set(value) = synchronized(modelPathsLock) {
+            prefs.edit().putStringSet(KEY_REGISTERED_MODEL_PATHS, value.toSet()).apply()
+        }
 
     fun registerModelPath(path: String) {
-        val current = registeredModelPaths.toMutableSet()
-        current.add(path)
-        registeredModelPaths = current
+        synchronized(modelPathsLock) {
+            val current = (prefs.getStringSet(KEY_REGISTERED_MODEL_PATHS, emptySet()) ?: emptySet()).toMutableSet()
+            if (current.add(path)) {
+                prefs.edit().putStringSet(KEY_REGISTERED_MODEL_PATHS, current).apply()
+            }
+        }
     }
 
     fun unregisterModelPath(path: String) {
-        val current = registeredModelPaths.toMutableSet()
-        current.remove(path)
-        registeredModelPaths = current
+        synchronized(modelPathsLock) {
+            val current = (prefs.getStringSet(KEY_REGISTERED_MODEL_PATHS, emptySet()) ?: emptySet()).toMutableSet()
+            if (current.remove(path)) {
+                prefs.edit().putStringSet(KEY_REGISTERED_MODEL_PATHS, current).apply()
+            }
+        }
+    }
+
+    fun pruneRegisteredModelPaths(pathsToRemove: Set<String>) {
+        if (pathsToRemove.isEmpty()) return
+        synchronized(modelPathsLock) {
+            val current = (prefs.getStringSet(KEY_REGISTERED_MODEL_PATHS, emptySet()) ?: emptySet()).toMutableSet()
+            if (current.removeAll(pathsToRemove)) {
+                prefs.edit().putStringSet(KEY_REGISTERED_MODEL_PATHS, current).apply()
+            }
+        }
     }
 
     override val promptProfiles: List<PromptProfile>
-        get() {
+        get() = synchronized(promptProfilesLock) {
             val json = promptProfilesJson ?: ""
             if (json.isBlank()) return defaultProfiles()
             return try {
@@ -66,17 +91,17 @@ class AppPreferences(context: Context) : com.example.on_device_qwen.model.IMemor
         }
 
     override var activePromptProfile: PromptProfile
-        get() {
+        get() = synchronized(promptProfilesLock) {
             val id = activePromptProfileId()
             val profiles = promptProfiles
-            return profiles.firstOrNull { it.id == id } ?: profiles.firstOrNull() ?: PromptProfile.standardDefault()
+            profiles.firstOrNull { it.id == id } ?: profiles.firstOrNull() ?: PromptProfile.standardDefault()
         }
-        set(value) {
+        set(value) = synchronized(promptProfilesLock) {
             addOrUpdateProfile(value)
             setActivePromptProfile(value.id)
         }
 
-    override fun activePromptProfileId(): String {
+    override fun activePromptProfileId(): String = synchronized(promptProfilesLock) {
         val stored = activePromptProfileJson ?: return PromptProfile.DEFAULT_ID
         return try {
             JSONObject(stored).optString(KEY_PROFILE_ID, PromptProfile.DEFAULT_ID)
@@ -86,59 +111,69 @@ class AppPreferences(context: Context) : com.example.on_device_qwen.model.IMemor
     }
 
     override fun savePromptProfiles(profiles: List<PromptProfile>) {
-        val json = JSONArray().apply {
-            profiles.forEach { profile ->
-                put(JSONObject().apply {
-                    put(KEY_PROFILE_ID, profile.id)
-                    put(KEY_PROFILE_NAME, profile.name)
-                    put(KEY_PROFILE_TEXT, profile.instructionText)
-                    put(KEY_PROFILE_EFFECTIVE, profile.effectiveSystemPrompt)
-                })
-            }
-        }.toString()
-        promptProfilesJson = json
+        synchronized(promptProfilesLock) {
+            val json = JSONArray().apply {
+                profiles.forEach { profile ->
+                    put(JSONObject().apply {
+                        put(KEY_PROFILE_ID, profile.id)
+                        put(KEY_PROFILE_NAME, profile.name)
+                        put(KEY_PROFILE_TEXT, profile.instructionText)
+                        put(KEY_PROFILE_EFFECTIVE, profile.effectiveSystemPrompt)
+                    })
+                }
+            }.toString()
+            promptProfilesJson = json
+        }
     }
 
     override fun setActivePromptProfile(profileId: String) {
-        activePromptProfileJson = JSONObject().apply { put(KEY_PROFILE_ID, profileId) }.toString()
+        synchronized(promptProfilesLock) {
+            activePromptProfileJson = JSONObject().apply { put(KEY_PROFILE_ID, profileId) }.toString()
+        }
     }
 
     override fun addOrUpdateProfile(profile: PromptProfile) {
-        val sanitized = profile.copy(
-            name = profile.name.trim().take(PromptProfile.MAX_NAME_CHARS),
-            instructionText = profile.instructionText.trim().take(PromptProfile.MAX_INSTRUCTION_CHARS),
-            effectiveSystemPrompt = sanitizeSystemPrompt(
-                profile.effectiveSystemPrompt.ifBlank { profile.instructionText }
-            ),
-        )
-        val current = promptProfiles.toMutableList()
-        val idx = current.indexOfFirst { it.id == sanitized.id }
-        if (idx >= 0) {
-            current[idx] = sanitized
-        } else {
-            current.add(sanitized)
+        synchronized(promptProfilesLock) {
+            val sanitized = profile.copy(
+                name = profile.name.trim().take(PromptProfile.MAX_NAME_CHARS),
+                instructionText = profile.instructionText.trim().take(PromptProfile.MAX_INSTRUCTION_CHARS),
+                effectiveSystemPrompt = sanitizeSystemPrompt(
+                    profile.effectiveSystemPrompt.ifBlank { profile.instructionText }
+                ),
+            )
+            val current = promptProfiles.toMutableList()
+            val idx = current.indexOfFirst { it.id == sanitized.id }
+            if (idx >= 0) {
+                current[idx] = sanitized
+            } else {
+                current.add(sanitized)
+            }
+            savePromptProfiles(current)
         }
-        savePromptProfiles(current)
     }
 
     fun resetProfileToDefault(profileId: String) {
-        val builtIn = PromptProfile.builtInProfiles().firstOrNull { it.id == profileId } ?: return
-        val current = promptProfiles.toMutableList()
-        val idx = current.indexOfFirst { it.id == profileId }
-        if (idx >= 0) current[idx] = builtIn else current.add(builtIn)
-        savePromptProfiles(current)
+        synchronized(promptProfilesLock) {
+            val builtIn = PromptProfile.builtInProfiles().firstOrNull { it.id == profileId } ?: return
+            val current = promptProfiles.toMutableList()
+            val idx = current.indexOfFirst { it.id == profileId }
+            if (idx >= 0) current[idx] = builtIn else current.add(builtIn)
+            savePromptProfiles(current)
+        }
     }
 
     override fun removeProfile(profileId: String) {
-        // Built-ins can be reset, never deleted — prevents bricking the prompt selector.
-        if (PromptProfile.builtInProfiles().any { it.id == profileId }) return
-        if (profileId == PromptProfile.DEFAULT_ID || profileId == PromptProfile.UNRESTRICTED_ID) return
-        val current = promptProfiles.toMutableList()
-        if (current.size <= 1) return
-        current.removeAll { it.id == profileId }
-        savePromptProfiles(current)
-        if (activePromptProfileId() == profileId) {
-            activePromptProfileJson = JSONObject().apply { put(KEY_PROFILE_ID, current.firstOrNull()?.id ?: PromptProfile.DEFAULT_ID) }.toString()
+        synchronized(promptProfilesLock) {
+            // Built-ins can be reset, never deleted — prevents bricking the prompt selector.
+            if (PromptProfile.builtInProfiles().any { it.id == profileId }) return
+            if (profileId == PromptProfile.DEFAULT_ID || profileId == PromptProfile.UNRESTRICTED_ID) return
+            val current = promptProfiles.toMutableList()
+            if (current.size <= 1) return
+            current.removeAll { it.id == profileId }
+            savePromptProfiles(current)
+            if (activePromptProfileId() == profileId) {
+                activePromptProfileJson = JSONObject().apply { put(KEY_PROFILE_ID, current.firstOrNull()?.id ?: PromptProfile.DEFAULT_ID) }.toString()
+            }
         }
     }
 
@@ -207,12 +242,16 @@ class AppPreferences(context: Context) : com.example.on_device_qwen.model.IMemor
         set(value) = prefs.edit().putString(KEY_UNRESTRICTED_MODE, value.name).apply()
 
     var activePromptProfileJson: String?
-        get() = prefs.getString(KEY_ACTIVE_PROMPT_PROFILE, null)
-        set(value) = prefs.edit().putString(KEY_ACTIVE_PROMPT_PROFILE, value).apply()
+        get() = synchronized(promptProfilesLock) { prefs.getString(KEY_ACTIVE_PROMPT_PROFILE, null) }
+        set(value) = synchronized(promptProfilesLock) {
+            prefs.edit().putString(KEY_ACTIVE_PROMPT_PROFILE, value).apply()
+        }
 
     var promptProfilesJson: String?
-        get() = prefs.getString(KEY_PROMPT_PROFILES, null)
-        set(value) = prefs.edit().putString(KEY_PROMPT_PROFILES, value).apply()
+        get() = synchronized(promptProfilesLock) { prefs.getString(KEY_PROMPT_PROFILES, null) }
+        set(value) = synchronized(promptProfilesLock) {
+            prefs.edit().putString(KEY_PROMPT_PROFILES, value).apply()
+        }
 
     var themeMode: ThemeMode
         get() {
@@ -252,6 +291,22 @@ class AppPreferences(context: Context) : com.example.on_device_qwen.model.IMemor
         get() = prefs.getInt(KEY_MAX_MEMORY_ITEMS, 4)
         set(value) = prefs.edit().putInt(KEY_MAX_MEMORY_ITEMS, value).apply()
 
+    var onboardingCompleted: Boolean
+        get() = prefs.getBoolean(KEY_ONBOARDING_COMPLETED, false)
+        set(value) = prefs.edit().putBoolean(KEY_ONBOARDING_COMPLETED, value).apply()
+
+    fun shouldShowOnboarding(hasInstalledModels: Boolean = false): Boolean {
+        return !onboardingCompleted && !hasInstalledModels && activeModelPath.isNullOrBlank()
+    }
+
+    var dynamicColorEnabled: Boolean
+        get() = prefs.getBoolean(KEY_DYNAMIC_COLOR_ENABLED, false)
+        set(value) = prefs.edit().putBoolean(KEY_DYNAMIC_COLOR_ENABLED, value).apply()
+
+    var showAdvancedSettings: Boolean
+        get() = prefs.getBoolean(KEY_SHOW_ADVANCED_SETTINGS, false)
+        set(value) = prefs.edit().putBoolean(KEY_SHOW_ADVANCED_SETTINGS, value).apply()
+
     companion object {
         private const val PREFS_NAME = "on_device_qwen_prefs"
         private const val KEY_ACTIVE_MODEL_PATH = "active_model_path"
@@ -276,5 +331,8 @@ class AppPreferences(context: Context) : com.example.on_device_qwen.model.IMemor
         private const val KEY_PERSISTENT_MEMORY_ENABLED = "persistent_memory_enabled"
         private const val KEY_REPETITION_PENALTY = "repetition_penalty"
         private const val KEY_MAX_MEMORY_ITEMS = "max_memory_items"
+        private const val KEY_ONBOARDING_COMPLETED = "onboarding_completed"
+        private const val KEY_DYNAMIC_COLOR_ENABLED = "dynamic_color_enabled"
+        private const val KEY_SHOW_ADVANCED_SETTINGS = "show_advanced_settings"
     }
 }

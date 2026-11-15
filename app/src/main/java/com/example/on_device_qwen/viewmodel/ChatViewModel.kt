@@ -127,6 +127,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val _maxTokens = MutableStateFlow(prefs.maxOutputTokens)
     val maxTokens: StateFlow<Int> = _maxTokens.asStateFlow()
 
+    private val _repetitionPenalty = MutableStateFlow(prefs.repetitionPenalty)
+    val repetitionPenalty: StateFlow<Float> = _repetitionPenalty.asStateFlow()
+
+    private val _contextLength = MutableStateFlow(prefs.contextLength)
+    val contextLength: StateFlow<Int> = _contextLength.asStateFlow()
+
     private val _systemPrompt = MutableStateFlow(prefs.systemPrompt)
     val systemPrompt: StateFlow<String> = _systemPrompt.asStateFlow()
 
@@ -135,6 +141,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _themeMode = MutableStateFlow(prefs.themeMode)
     val themeMode: StateFlow<ThemeMode> = _themeMode.asStateFlow()
+
+    private val _hapticsEnabled = MutableStateFlow(prefs.hapticsEnabled)
+    val hapticsEnabled: StateFlow<Boolean> = _hapticsEnabled.asStateFlow()
 
     private val _chatMode = MutableStateFlow(prefs.unrestrictedMode)
     val chatMode: StateFlow<UnrestrictedMode> = _chatMode.asStateFlow()
@@ -161,7 +170,31 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun validateCurrentConfig(): List<com.example.on_device_qwen.domain.context.PromptValidationError> {
         val config = currentGenerationConfig()
         lastValidationResult = com.example.on_device_qwen.domain.context.PromptValidation.validate(config)
+        if (lastValidationResult.isEmpty()) {
+            _validationBanner.value = null
+        } else {
+            _validationBanner.value = lastValidationResult.first().message
+        }
         return lastValidationResult
+    }
+
+    fun dismissValidationBanner() {
+        _validationBanner.value = null
+    }
+
+    /**
+     * Returns active parameter validation errors followed by engine runtime
+     * support notices from [PromptValidation.auditRuntimeSupport].
+     */
+    fun runtimeSupportNotices(): List<String> {
+        val config = currentGenerationConfig()
+        val errors = com.example.on_device_qwen.domain.context.PromptValidation
+            .validate(config)
+            .map { it.message }
+        val runtimeNotes = com.example.on_device_qwen.domain.context.PromptValidation
+            .auditRuntimeSupport(config)
+            .map { it.message }
+        return (errors + runtimeNotes).distinct()
     }
 
     fun currentGenerationConfig(): GenerationConfig {
@@ -177,11 +210,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 GenerationConfig.MIN_TEMPERATURE, GenerationConfig.MAX_TEMPERATURE,
             ),
             topP = _topP.value.coerceIn(GenerationConfig.MIN_TOP_P, GenerationConfig.MAX_TOP_P),
-            repetitionPenalty = prefs.repetitionPenalty,
+            repetitionPenalty = _repetitionPenalty.value.coerceIn(
+                GenerationConfig.MIN_REPETITION_PENALTY, GenerationConfig.MAX_REPETITION_PENALTY,
+            ),
             maxOutputTokens = _maxTokens.value.coerceIn(
                 GenerationConfig.MIN_MAX_TOKENS, GenerationConfig.MAX_MAX_TOKENS,
             ),
-            contextLength = prefs.contextLength.coerceIn(
+            contextLength = _contextLength.value.coerceIn(
                 GenerationConfig.MIN_CONTEXT_LENGTH, GenerationConfig.MAX_CONTEXT_LENGTH,
             ),
             systemPrompt = com.example.on_device_qwen.model.sanitizeSystemPrompt(resolvedPrompt),
@@ -264,16 +299,20 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setRepetitionPenalty(value: Float) {
-        prefs.repetitionPenalty = value.coerceIn(
+        val clamped = value.coerceIn(
             GenerationConfig.MIN_REPETITION_PENALTY, GenerationConfig.MAX_REPETITION_PENALTY,
         )
+        _repetitionPenalty.value = clamped
+        prefs.repetitionPenalty = clamped
         validateCurrentConfig().also { lastValidationResult = it }
     }
 
     fun setContextLength(value: Int) {
-        prefs.contextLength = value.coerceIn(
+        val clamped = value.coerceIn(
             GenerationConfig.MIN_CONTEXT_LENGTH, GenerationConfig.MAX_CONTEXT_LENGTH,
         )
+        _contextLength.value = clamped
+        prefs.contextLength = clamped
         validateCurrentConfig().also { lastValidationResult = it }
     }
 
@@ -464,6 +503,66 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         if (_isGenerating.value) return
         initializeEngine(requestedBackend = backend)
     }
+
+    /**
+     * Deletes (if app-owned) and unregisters a discovered model, unloading and
+     * falling back to the next available model when deleting the active one.
+     */
+    fun deleteModel(model: ModelMetadata): Boolean {
+        if (_engineState.value is EngineState.Loading) return false
+
+        val targetPath = model.file.absolutePath
+        val targetCanon = canonicalPathOf(model.file)
+        val activePrefCanon = prefs.activeModelPath?.let { canonicalPathOf(File(it)) }
+        val activeLoadedCanon = activeEngine?.activeModel?.file?.let { canonicalPathOf(it) }
+        val isDeletingActive = targetCanon == activePrefCanon || targetCanon == activeLoadedCanon
+
+        if (isDeletingActive) {
+            if (_isGenerating.value) stopGeneration()
+            prefs.activeModelPath = null
+        }
+        prefs.unregisterModelPath(targetPath)
+
+        _discoveredModels.value = _discoveredModels.value.filterNot { candidate ->
+            canonicalPathOf(candidate.file) == targetCanon
+        }
+        _availableModels.value = _discoveredModels.value.map { it.file }
+
+        viewModelScope.launch {
+            if (isDeletingActive) {
+                withContext(Dispatchers.IO) {
+                    activeEngine?.unloadModel()
+                }
+                activeEngine = null
+                _isVisionModel.value = false
+                _modelTitle.value = "Qwen"
+            }
+
+            val deleted = modelRepository.deleteModel(model.file)
+            val remaining = modelRepository.scanModels()
+            _discoveredModels.value = remaining
+            _availableModels.value = remaining.map { it.file }
+
+            if (!deleted) {
+                _validationBanner.value = "Could not delete ${model.name}."
+            }
+
+            if (isDeletingActive) {
+                val fallback = remaining.firstOrNull { candidate ->
+                    canonicalPathOf(candidate.file) != targetCanon
+                }
+                if (fallback != null) {
+                    initializeEngine(explicitModelFile = fallback.file)
+                } else {
+                    _engineState.value = EngineState.Idle
+                }
+            }
+        }
+        return true
+    }
+
+    private fun canonicalPathOf(file: File): String =
+        try { file.canonicalPath } catch (_: Exception) { file.absolutePath }
 
     /**
      * Send user message and stream token chunks to UI with real-time telemetry,
@@ -900,6 +999,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun setThemeMode(mode: ThemeMode) {
         _themeMode.value = mode
         prefs.themeMode = mode
+    }
+
+    fun setHapticsEnabled(enabled: Boolean) {
+        _hapticsEnabled.value = enabled
+        prefs.hapticsEnabled = enabled
     }
 
     fun regenerationConfig(): GenerationConfig {

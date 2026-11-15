@@ -13,10 +13,118 @@ enum class ModelFormat(val extension: String) {
     GGUF(".gguf")
 }
 
+enum class ChatTemplateFamily(
+    val displayName: String,
+    val defaultStopSequences: List<String>,
+) {
+    CHATML("ChatML", listOf("<|im_end|>", "<|endoftext|>", "<|im_start|>")),
+    LLAMA3("Llama 3", listOf("<|eot_id|>", "<|end_of_text|>", "<|start_header_id|>")),
+    GEMMA("Gemma", listOf("<end_of_turn>", "<eos>")),
+    PHI("Phi", listOf("<|end|>", "<|endoftext|>", "<|assistant|>")),
+    DEEPSEEK("DeepSeek", listOf("<｜end▁of▁sentence｜>", "<|EOT|>", "<|endoftext|>")),
+    RAW("Raw / Plain", listOf("<|endoftext|>", "</s>"));
+
+    companion object {
+        /** Infers prompt family from Jinja chat template markers first, then architecture/name. */
+        fun infer(
+            architecture: String? = null,
+            chatTemplate: String? = null,
+            modelName: String = "",
+        ): ChatTemplateFamily {
+            val tmpl = chatTemplate.orEmpty()
+            if (tmpl.isNotBlank()) {
+                return when {
+                    tmpl.contains("<|im_start|>") -> CHATML
+                    tmpl.contains("<|start_header_id|>") && tmpl.contains("<|end_header_id|>") -> LLAMA3
+                    tmpl.contains("<start_of_turn>") -> GEMMA
+                    tmpl.contains("<|assistant|>") && tmpl.contains("<|end|>") -> PHI
+                    tmpl.contains("<｜Assistant｜>") || tmpl.contains("<|EOT|>") -> DEEPSEEK
+                    else -> inferFromArchAndName(architecture, modelName)
+                }
+            }
+            return inferFromArchAndName(architecture, modelName)
+        }
+
+        private fun inferFromArchAndName(architecture: String?, modelName: String): ChatTemplateFamily {
+            val arch = architecture.orEmpty().lowercase()
+            val name = modelName.lowercase()
+            return when {
+                arch.contains("qwen") || name.contains("qwen") || name.contains("dolphin") -> CHATML
+                arch.contains("gemma") || name.contains("gemma") -> GEMMA
+                arch.contains("phi") || name.contains("phi") -> PHI
+                arch.contains("deepseek") || name.contains("deepseek") -> {
+                    if (name.contains("r1") && name.contains("qwen")) CHATML else DEEPSEEK
+                }
+                arch.contains("llama") || name.contains("llama") -> {
+                    if (name.contains("llama-3") || name.contains("llama3")) LLAMA3 else RAW
+                }
+                else -> CHATML
+            }
+        }
+    }
+}
+
+enum class Modality {
+    TEXT,
+    VISION,
+}
+
+enum class ModelCompatibilityStatus {
+    COMPATIBLE,
+    TIGHT_RAM,
+    INSUFFICIENT_RAM,
+    UNSUPPORTED_FORMAT,
+    CORRUPTED,
+}
+
+enum class ModelLifecycleState {
+    IDLE,
+    DOWNLOADING,
+    IMPORTING,
+    VERIFYING,
+    LOADING,
+    READY,
+    INCOMPATIBLE,
+    FAILED,
+}
+
 enum class BackendType(val label: String, val chipText: String) {
     CPU("CPU (XNNPACK / NEON)", "CPU"),
     GPU("GPU (OpenCL / Adreno)", "GPU"),
-    NPU("NPU (Qualcomm HTP)", "NPU")
+    NPU("NPU (Qualcomm HTP)", "NPU");
+
+    fun displayLabel(engineType: EngineType): String = when (this) {
+        CPU -> when (engineType) {
+            EngineType.LLAMA_CPP -> "CPU (llama.cpp NEON)"
+            EngineType.LITERT -> "CPU (LiteRT XNNPACK)"
+        }
+        GPU -> when (engineType) {
+            EngineType.LLAMA_CPP -> "GPU (Unavailable in llama.cpp CPU build)"
+            EngineType.LITERT -> "GPU (LiteRT Delegate)"
+        }
+        NPU -> when (engineType) {
+            EngineType.LLAMA_CPP -> "NPU (Unavailable in llama.cpp CPU build)"
+            EngineType.LITERT -> "NPU (LiteRT HTP Delegate)"
+        }
+    }
+
+    fun isSupportedBy(engineType: EngineType): Boolean = when (engineType) {
+        EngineType.LLAMA_CPP -> this == CPU
+        EngineType.LITERT -> true
+    }
+
+    fun resolveForEngine(engineType: EngineType): BackendType =
+        if (isSupportedBy(engineType)) this else CPU
+}
+
+data class ExecutionBackendInfo(
+    val requested: BackendType,
+    val active: BackendType,
+    val fallbackReason: String? = null,
+    val effectiveThreads: Int = 0,
+    val effectiveContextLength: Int = 0,
+) {
+    val isFallback: Boolean get() = requested != active || !fallbackReason.isNullOrBlank()
 }
 
 data class ModelMetadata(
@@ -24,7 +132,7 @@ data class ModelMetadata(
     val name: String,
     val format: ModelFormat,
     val engineType: EngineType,
-    val architecture: String = "qwen2",
+    val architecture: String = "Unknown",
     val quantization: String = "Unknown",
     val contextLength: Int = 4096,
     val fileSizeBytes: Long = 0L,
@@ -34,9 +142,24 @@ data class ModelMetadata(
     val parameterCount: String = "",
     val isReadable: Boolean = true,
     val isCorrupted: Boolean = false,
+    val chatTemplate: String? = null,
+    val templateFamily: ChatTemplateFamily = ChatTemplateFamily.CHATML,
+    val supportedModalities: Set<Modality> =
+        if (hasVision) setOf(Modality.TEXT, Modality.VISION) else setOf(Modality.TEXT),
+    val visionUnsupportedReason: String? = null,
+    val recommendedRamMb: Long = 0L,
+    val minRamMb: Long = 0L,
+    val estimatedKvRamMb: Long = 0L,
+    val sha256: String? = null,
+    val compatibilityStatus: ModelCompatibilityStatus =
+        if (isCorrupted) ModelCompatibilityStatus.CORRUPTED else ModelCompatibilityStatus.COMPATIBLE,
+    val compatibilityMessage: String? = null,
 ) {
     val fileSizeMb: Long get() = fileSizeBytes / (1024 * 1024)
     val estimatedRamMb: Long get() = estimatedRamBytes / (1024 * 1024)
+    val sizeBytes: Long get() = fileSizeBytes
+    val supportsVisionModality: Boolean
+        get() = Modality.VISION in supportedModalities && visionUnsupportedReason == null
 }
 
 enum class ModelErrorCode {
@@ -79,6 +202,10 @@ data class GenerationConfig(
     val generationId: String = "",
     val unrestrictedMode: UnrestrictedMode = UnrestrictedMode.STANDARD,
     val activePromptProfileId: String = PromptProfile.DEFAULT_ID,
+    val topK: Int = 40,
+    val minP: Float = 0.05f,
+    val seed: Int = -1,
+    val streamBatchIntervalMs: Long = 40L,
 ) {
     companion object {
         const val DEFAULT_SYSTEM_PROMPT =
@@ -110,12 +237,55 @@ data class GenerationConfig(
         const val MIN_THREAD_COUNT = 1
         const val MAX_THREAD_COUNT = 8
         const val MAX_SYSTEM_PROMPT_CHARS = 8192
+        const val MIN_TOP_K = 0
+        const val MAX_TOP_K = 200
+        const val MIN_MIN_P = 0.0f
+        const val MAX_MIN_P = 1.0f
+        const val MIN_STREAM_BATCH_INTERVAL_MS = 16L
+        const val MAX_STREAM_BATCH_INTERVAL_MS = 500L
 
         /**
-         * Inspectable, engine-aware capability matrix used by settings UI and docs.
-         * LiteRT-LM exposes sampling through its own runtime; the bundled llama.cpp
-         * JNI bridge currently uses fixed defaults (see dolphin_gguf.cpp).
+         * Accurate runtime parameter matrix for UI/validation inspection.
+         * Reflects verified C++ / LiteRT-LM runtime behavior.
          */
+        fun runtimeParameterSupport(engineType: EngineType): List<SupportedParameter> {
+            return when (engineType) {
+                EngineType.LLAMA_CPP -> listOf(
+                    SupportedParameter("systemPrompt", "System prompt / instruction template", true, "Single sanitized system turn formatted via model template family."),
+                    SupportedParameter("maxOutputTokens", "Maximum generation tokens", true, "Clamped to 1..2048 in dolphin_gguf.cpp."),
+                    SupportedParameter("stopSequences", "Stop sequences / end-of-turn tokens", true, "Stops on native EOG tokens plus configured stop markers."),
+                    SupportedParameter("contextLength", "Context window", true, "Load-time n_ctx clamped to 1024..4096 in dolphin_gguf.cpp."),
+                    SupportedParameter("threadCount", "CPU threads", true, "Load-time n_threads clamped to 1..4 in dolphin_gguf.cpp."),
+                    SupportedParameter("temperature", "Temperature", true, "Clamped 0.0..2.0 and applied in dolphin_gguf.cpp sampler chain (0.0 uses greedy argmax once Wave 2 lands)."),
+                    SupportedParameter("topP", "Top-p sampling", true, "Clamped 0.05..1.0 and applied via llama_sampler_init_top_p."),
+                    SupportedParameter("repetitionPenalty", "Repetition penalty", true, "Clamped 1.0..2.0 and applied via llama_sampler_init_penalties (last_n=64)."),
+                    SupportedParameter("topK", "Top-K sampling", false, "Contract defined (default 40); pending JNI plumbing in dolphin_gguf.cpp."),
+                    SupportedParameter("minP", "Min-P sampling", false, "Contract defined (default 0.05); pending JNI plumbing in dolphin_gguf.cpp."),
+                    SupportedParameter("seed", "RNG seed", false, "Contract defined (-1 = random); pending JNI plumbing in dolphin_gguf.cpp."),
+                )
+                EngineType.LITERT -> listOf(
+                    SupportedParameter("systemPrompt", "System prompt / instruction template", true, "Applied cleanly via ConversationConfig.systemInstruction without user-turn duplication."),
+                    SupportedParameter("maxOutputTokens", "Maximum generation tokens", true, "Supported by LiteRT-LM ConversationConfig/sendMessageAsync maxOutputToken."),
+                    SupportedParameter("stopSequences", "Stop sequences / end-of-turn tokens", true, "Handled natively by LiteRT-LM stop tokens and post-filter sanitization."),
+                    SupportedParameter("contextLength", "Context window", true, "Applied via EngineConfig.maxNumTokens at load time."),
+                    SupportedParameter("threadCount", "CPU threads", true, "Applied via Backend.CPU(numOfThreads) when running CPU backend."),
+                    SupportedParameter("temperature", "Temperature", true, "Supported via LiteRT-LM SamplerConfig."),
+                    SupportedParameter("topP", "Top-p sampling", true, "Supported via LiteRT-LM SamplerConfig."),
+                    SupportedParameter("topK", "Top-K sampling", true, "Supported via LiteRT-LM SamplerConfig."),
+                    SupportedParameter("repetitionPenalty", "Repetition penalty", true, "Supported via LiteRT-LM RepetitionPenaltyConfig."),
+                    SupportedParameter("seed", "RNG seed", true, "Supported via LiteRT-LM SamplerConfig."),
+                )
+            }
+        }
+
+        /**
+         * Legacy parameter support matrix retained strictly for Wave 1 unit test source compatibility.
+         * Wave 2 will migrate callers and [UnrestrictedModeAndPromptProfileTests] to [runtimeParameterSupport].
+         */
+        @Deprecated(
+            message = "Legacy inaccurate matrix retained for Wave 1 test compatibility; use runtimeParameterSupport(engineType).",
+            replaceWith = ReplaceWith("runtimeParameterSupport(engineType)"),
+        )
         fun supportedParameters(engineType: EngineType): List<SupportedParameter> {
             val common = listOf(
                 SupportedParameter("systemPrompt", "System prompt / instruction template", true, "Applied via ChatML system block (GGUF) or ConversationConfig (LiteRT)."),

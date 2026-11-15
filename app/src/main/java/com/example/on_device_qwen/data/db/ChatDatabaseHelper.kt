@@ -1,13 +1,8 @@
 package com.example.on_device_qwen.data.db
 
-import android.content.ContentValues
 import android.content.Context
-import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
-import com.example.on_device_qwen.model.BenchmarkMetrics
-import com.example.on_device_qwen.model.ChatMessage
-import com.example.on_device_qwen.model.ConversationSession
 
 class ChatDatabaseHelper(context: Context) : SQLiteOpenHelper(
     context, DATABASE_NAME, null, DATABASE_VERSION
@@ -44,9 +39,17 @@ class ChatDatabaseHelper(context: Context) : SQLiteOpenHelper(
                 $COL_MSG_DURATION_MS INTEGER DEFAULT 0,
                 $COL_MSG_BACKEND TEXT DEFAULT 'CPU',
                 $COL_MSG_IS_ERROR INTEGER DEFAULT 0,
+                $COL_MSG_PREFILL_TPS REAL DEFAULT 0.0,
+                $COL_MSG_PREFILL_TOKENS INTEGER DEFAULT 0,
+                $COL_MSG_MODEL_NAME TEXT,
+                $COL_MSG_BACKEND_LABEL TEXT,
+                $COL_MSG_IS_CANCELLED INTEGER DEFAULT 0,
                 FOREIGN KEY ($COL_MSG_CONV_ID) REFERENCES $TABLE_CONVERSATIONS($COL_CONV_ID) ON DELETE CASCADE
             )
             """.trimIndent()
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS idx_messages_conv_time ON $TABLE_MESSAGES ($COL_MSG_CONV_ID, $COL_MSG_TIMESTAMP, $COL_MSG_ID)"
         )
 
         db.execSQL("CREATE INDEX idx_messages_conv ON $TABLE_MESSAGES($COL_MSG_CONV_ID, $COL_MSG_TIMESTAMP)")
@@ -91,6 +94,47 @@ class ChatDatabaseHelper(context: Context) : SQLiteOpenHelper(
         if (oldVersion < 2) {
             createMemoryTables(db)
         }
+        if (oldVersion < 3) {
+            migrateMessagesToV3(db)
+        }
+    }
+
+    private fun migrateMessagesToV3(db: SQLiteDatabase) {
+        val existingColumns = existingColumns(db, TABLE_MESSAGES)
+        val v3Columns = listOf(
+            COL_MSG_PREFILL_TPS to "REAL DEFAULT 0.0",
+            COL_MSG_PREFILL_TOKENS to "INTEGER DEFAULT 0",
+            COL_MSG_MODEL_NAME to "TEXT",
+            COL_MSG_BACKEND_LABEL to "TEXT",
+            COL_MSG_IS_CANCELLED to "INTEGER DEFAULT 0",
+        )
+        db.beginTransaction()
+        try {
+            v3Columns.forEach { (colName, colDef) ->
+                if (colName !in existingColumns) {
+                    db.execSQL("ALTER TABLE $TABLE_MESSAGES ADD COLUMN $colName $colDef")
+                }
+            }
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS idx_messages_conv_time ON $TABLE_MESSAGES ($COL_MSG_CONV_ID, $COL_MSG_TIMESTAMP, $COL_MSG_ID)"
+            )
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    private fun existingColumns(db: SQLiteDatabase, tableName: String): Set<String> {
+        val columns = mutableSetOf<String>()
+        db.rawQuery("PRAGMA table_info($tableName)", null).use { cursor ->
+            val nameIdx = cursor.getColumnIndex("name")
+            while (cursor.moveToNext()) {
+                if (nameIdx >= 0) {
+                    columns.add(cursor.getString(nameIdx))
+                }
+            }
+        }
+        return columns
     }
 
     override fun onConfigure(db: SQLiteDatabase) {
@@ -100,7 +144,7 @@ class ChatDatabaseHelper(context: Context) : SQLiteOpenHelper(
 
     companion object {
         const val DATABASE_NAME = "qwen_chat.db"
-        const val DATABASE_VERSION = 2
+        const val DATABASE_VERSION = 3
 
         const val TABLE_CONVERSATIONS = "conversations"
         const val COL_CONV_ID = "id"
@@ -125,6 +169,11 @@ class ChatDatabaseHelper(context: Context) : SQLiteOpenHelper(
         const val COL_MSG_DURATION_MS = "duration_ms"
         const val COL_MSG_BACKEND = "backend"
         const val COL_MSG_IS_ERROR = "is_error"
+        const val COL_MSG_PREFILL_TPS = "prefill_tps"
+        const val COL_MSG_PREFILL_TOKENS = "prefill_tokens"
+        const val COL_MSG_MODEL_NAME = "model_name"
+        const val COL_MSG_BACKEND_LABEL = "backend_label"
+        const val COL_MSG_IS_CANCELLED = "is_cancelled"
 
         const val TABLE_MEMORIES = "memories"
         const val COL_MEM_ID = "id"

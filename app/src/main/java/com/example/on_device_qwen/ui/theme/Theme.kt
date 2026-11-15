@@ -2,88 +2,96 @@ package com.example.on_device_qwen.ui.theme
 
 import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.compose.material3.*
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.dynamicDarkColorScheme
+import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.remember
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import com.example.on_device_qwen.ui.designsystem.DarkSovereignColors
+import com.example.on_device_qwen.ui.designsystem.LightSovereignColors
+import com.example.on_device_qwen.ui.designsystem.LocalAdaptiveLayoutInfo
+import com.example.on_device_qwen.ui.designsystem.LocalHapticsEnabled
+import com.example.on_device_qwen.ui.designsystem.LocalReducedMotion
+import com.example.on_device_qwen.ui.designsystem.LocalSovereignColors
+import com.example.on_device_qwen.ui.designsystem.LocalSovereignMotion
+import com.example.on_device_qwen.ui.designsystem.LocalSovereignShapes
+import com.example.on_device_qwen.ui.designsystem.LocalSovereignSpacing
+import com.example.on_device_qwen.ui.designsystem.SovereignMotion
+import com.example.on_device_qwen.ui.designsystem.SovereignShapes
+import com.example.on_device_qwen.ui.designsystem.SovereignSpacing
+import com.example.on_device_qwen.ui.designsystem.SovereignTypography
+import com.example.on_device_qwen.ui.designsystem.rememberAdaptiveLayoutInfo
+import com.example.on_device_qwen.ui.designsystem.rememberReducedMotion
 
-// ── ChatGPT-Inspired Minimalist Palette ──────────────────────────────────────
+// Legacy token aliases retained temporarily until Stage B components migrate to SovereignTheme.colors.
+val ChatGptGreen       = Color(0xFF0369A1)
+val QwenPrimary        = Color(0xFF0369A1)
+val QwenPrimaryDark    = Color(0xFF083358)
+val QwenSecondary      = Color(0xFF38BDF8)
+val QwenError          = Color(0xFFDC2626)
 
-val ChatGptGreen       = Color(0xFF10A37F)
-val QwenPrimary        = Color(0xFF10A37F)
-val QwenPrimaryDark    = Color(0xFF0E8C6D)
-val QwenSecondary      = Color(0xFF19C37D)
-val QwenError          = Color(0xFFEF4444)
+val DarkBackground     = Color(0xFF0B0C0F)
+val DarkSurface        = Color(0xFF121419)
+val DarkSurfaceVariant = Color(0xFF1E222B)
+val DarkTextPrimary    = Color(0xFFF1F2F4)
+val DarkTextSecondary  = Color(0xFFA6ACB8)
+val DarkUserBubble     = Color(0xFF1E222B)
 
-// Neutral Dark Canvas (inspired by ChatGPT dark mode)
-val DarkBackground     = Color(0xFF171717)
-val DarkSurface        = Color(0xFF212121)
-val DarkSurfaceVariant = Color(0xFF2F2F2F)
-val DarkTextPrimary    = Color(0xFFECECEC)
-val DarkTextSecondary  = Color(0xFFB4B4B4)
-val DarkUserBubble     = Color(0xFF2F2F2F)
+val LightBackground     = Color(0xFFFAF9F6)
+val LightSurface        = Color(0xFFF3F1EC)
+val LightSurfaceVariant = Color(0xFFECEAE3)
+val LightTextPrimary    = Color(0xFF121316)
+val LightTextSecondary  = Color(0xFF4F545F)
+val LightUserBubble     = Color(0xFFECEAE3)
 
-// Neutral Light Canvas (inspired by ChatGPT light mode)
-val LightBackground    = Color(0xFFFFFFFF)
-val LightSurface       = Color(0xFFF9F9F9)
-val LightSurfaceVariant = Color(0xFFF4F4F4)
-val LightTextPrimary   = Color(0xFF0D0D0D)
-val LightTextSecondary = Color(0xFF707070)
-val LightUserBubble    = Color(0xFFF4F4F4)
-
-val QwenUserBubble     = Color(0xFF2F2F2F)
+val QwenUserBubble     = Color(0xFF1E222B)
 val QwenBotBubble      = Color.Transparent
-
-private val DarkColorScheme = darkColorScheme(
-    primary            = QwenPrimary,
-    onPrimary          = Color.White,
-    secondary          = QwenSecondary,
-    onSecondary        = Color.White,
-    background         = DarkBackground,
-    surface            = DarkSurface,
-    surfaceVariant     = DarkSurfaceVariant,
-    onBackground       = DarkTextPrimary,
-    onSurface          = DarkTextPrimary,
-    onSurfaceVariant   = DarkTextSecondary,
-    outline            = Color(0xFF383838),
-    outlineVariant     = Color(0xFF2B2B2B),
-    error              = QwenError,
-)
-
-private val LightColorScheme = lightColorScheme(
-    primary            = Color(0xFF0D0D0D),
-    onPrimary          = Color.White,
-    secondary          = QwenPrimary,
-    onSecondary        = Color.White,
-    background         = LightBackground,
-    surface            = LightSurface,
-    surfaceVariant     = LightSurfaceVariant,
-    onBackground       = LightTextPrimary,
-    onSurface          = LightTextPrimary,
-    onSurfaceVariant   = LightTextSecondary,
-    outline            = Color(0xFFE5E5E5),
-    outlineVariant     = Color(0xFFECECEC),
-    error              = QwenError,
-)
 
 @Composable
 fun OnDeviceQwenTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
     dynamicColor: Boolean = false,
-    content: @Composable () -> Unit
+    hapticsEnabled: Boolean = true,
+    content: @Composable () -> Unit,
 ) {
-    val colorScheme = when {
-        dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
-            val context = LocalContext.current
-            if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-        }
-        darkTheme  -> DarkColorScheme
-        else       -> LightColorScheme
+    val sovereignColors = if (darkTheme) DarkSovereignColors else LightSovereignColors
+    val sovereignSpacing = remember { SovereignSpacing() }
+    val sovereignShapes = remember { SovereignShapes() }
+    val reducedMotion = rememberReducedMotion()
+    val sovereignMotion = remember(reducedMotion) { SovereignMotion(reducedMotion = reducedMotion) }
+    val adaptiveLayoutInfo = rememberAdaptiveLayoutInfo()
+
+    val baseScheme = remember(sovereignColors) { sovereignColors.toMaterial3ColorScheme() }
+    val colorScheme = if (dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        val context = LocalContext.current
+        val dynamic = if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
+        baseScheme.copy(
+            primary = dynamic.primary,
+            onPrimary = dynamic.onPrimary,
+            primaryContainer = dynamic.primaryContainer,
+            onPrimaryContainer = dynamic.onPrimaryContainer,
+        )
+    } else {
+        baseScheme
     }
 
-    MaterialTheme(
-        colorScheme = colorScheme,
-        typography  = Typography(),
-        content     = content,
-    )
+    CompositionLocalProvider(
+        LocalSovereignColors provides sovereignColors,
+        LocalSovereignSpacing provides sovereignSpacing,
+        LocalSovereignShapes provides sovereignShapes,
+        LocalSovereignMotion provides sovereignMotion,
+        LocalReducedMotion provides reducedMotion,
+        LocalHapticsEnabled provides hapticsEnabled,
+        LocalAdaptiveLayoutInfo provides adaptiveLayoutInfo,
+    ) {
+        MaterialTheme(
+            colorScheme = colorScheme,
+            typography = SovereignTypography.material3Typography,
+            shapes = sovereignShapes.toMaterial3Shapes(),
+            content = content,
+        )
+    }
 }

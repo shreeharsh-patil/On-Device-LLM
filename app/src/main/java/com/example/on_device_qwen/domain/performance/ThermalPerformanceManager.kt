@@ -17,18 +17,19 @@ enum class DeviceThermalState(val label: String, val isWarning: Boolean) {
     LIGHT("Light Warming", false),
     MODERATE("Moderate Heat", false),
     SEVERE("Severe Thermal Throttling", true),
-    CRITICAL("Critical Heat — Pausing", true)
+    CRITICAL("Critical Heat — Pausing", true),
 }
 
 class ThermalPerformanceManager(context: Context) {
 
-    // BUG-011 FIX: Always use applicationContext to prevent Activity context leaks
-    // across configuration changes (ThermalPerformanceManager lives in the ViewModel scope).
     private val context = context.applicationContext
     private val powerManager = this.context.getSystemService(Context.POWER_SERVICE) as? PowerManager
 
     private val _thermalState = MutableStateFlow(DeviceThermalState.NOMINAL)
     val thermalState: StateFlow<DeviceThermalState> = _thermalState.asStateFlow()
+
+    private val _shouldPauseGeneration = MutableStateFlow(false)
+    val shouldPauseGeneration: StateFlow<Boolean> = _shouldPauseGeneration.asStateFlow()
 
     private val _batteryTempCelsius = MutableStateFlow(28.0f)
     val batteryTempCelsius: StateFlow<Float> = _batteryTempCelsius.asStateFlow()
@@ -43,6 +44,7 @@ class ThermalPerformanceManager(context: Context) {
     val thermalHeadroom: StateFlow<Float> = _thermalHeadroom.asStateFlow()
 
     private var thermalListener: PowerManager.OnThermalStatusChangedListener? = null
+    private var batteryReceiverRegistered = false
 
     private val batteryReceiver = object : BroadcastReceiver() {
         override fun onReceive(c: Context?, intent: Intent?) {
@@ -58,7 +60,7 @@ class ThermalPerformanceManager(context: Context) {
 
                 val status = intent.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
                 _isCharging.value = status == BatteryManager.BATTERY_STATUS_CHARGING ||
-                        status == BatteryManager.BATTERY_STATUS_FULL
+                    status == BatteryManager.BATTERY_STATUS_FULL
             }
         }
     }
@@ -66,12 +68,18 @@ class ThermalPerformanceManager(context: Context) {
     init {
         registerThermalCallbacks()
         registerBatteryReceiver()
+        updateHeadroom()
+    }
+
+    private fun applyThermalState(state: DeviceThermalState) {
+        _thermalState.value = state
+        _shouldPauseGeneration.value = (state == DeviceThermalState.CRITICAL)
     }
 
     private fun registerThermalCallbacks() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && powerManager != null) {
-            thermalListener = PowerManager.OnThermalStatusChangedListener { status ->
-                _thermalState.value = when (status) {
+            val listener = PowerManager.OnThermalStatusChangedListener { status ->
+                val mapped = when (status) {
                     PowerManager.THERMAL_STATUS_NONE -> DeviceThermalState.NOMINAL
                     PowerManager.THERMAL_STATUS_LIGHT -> DeviceThermalState.LIGHT
                     PowerManager.THERMAL_STATUS_MODERATE -> DeviceThermalState.MODERATE
@@ -81,28 +89,32 @@ class ThermalPerformanceManager(context: Context) {
                     PowerManager.THERMAL_STATUS_SHUTDOWN -> DeviceThermalState.CRITICAL
                     else -> DeviceThermalState.NOMINAL
                 }
+                applyThermalState(mapped)
             }
+            thermalListener = listener
             try {
-                powerManager.addThermalStatusListener(this.context.mainExecutor, thermalListener!!)
+                powerManager.addThermalStatusListener(this.context.mainExecutor, listener)
             } catch (e: Exception) {
-                // BUG-012 FIX: Log failure so it's diagnosable; thermal state will remain NOMINAL
-                android.util.Log.w("ThermalMgr", "Failed to register thermal status listener — thermal throttling disabled", e)
+                android.util.Log.w("ThermalMgr", "Failed to register thermal status listener", e)
                 thermalListener = null
             }
         }
     }
 
     private fun registerBatteryReceiver() {
+        if (batteryReceiverRegistered) return
         try {
             val filter = IntentFilter(Intent.ACTION_BATTERY_CHANGED)
-            // BUG-024 FIX: Specify RECEIVER_NOT_EXPORTED on Android 14+ (API 34) to comply
-            // with the new dynamic receiver export requirement.
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 this.context.registerReceiver(batteryReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
             } else {
+                @Suppress("UnspecifiedRegisterReceiverFlag")
                 this.context.registerReceiver(batteryReceiver, filter)
             }
-        } catch (_: Exception) {}
+            batteryReceiverRegistered = true
+        } catch (_: Exception) {
+            batteryReceiverRegistered = false
+        }
     }
 
     fun updateHeadroom() {
@@ -111,47 +123,64 @@ class ThermalPerformanceManager(context: Context) {
                 val headroom = powerManager.getThermalHeadroom(30)
                 if (!headroom.isNaN()) {
                     _thermalHeadroom.value = headroom
+                    if (headroom < 0.05f && _thermalState.value.ordinal < DeviceThermalState.SEVERE.ordinal) {
+                        applyThermalState(DeviceThermalState.SEVERE)
+                    }
                 }
-            } catch (_: Exception) {}
+            } catch (_: Exception) {
+            }
         }
     }
 
+    /** Recommends an inter-token yield/throttle delay in milliseconds during sustained decode. */
+    fun recommendedThrottleDelayMs(): Long = when (_thermalState.value) {
+        DeviceThermalState.NOMINAL, DeviceThermalState.LIGHT -> 0L
+        DeviceThermalState.MODERATE -> 8L
+        DeviceThermalState.SEVERE -> 25L
+        DeviceThermalState.CRITICAL -> 100L
+    }
+
     /**
-     * Calculates the optimal CPU thread count considering current thermal conditions,
-     * available processor cores, and user-selected performance profile.
-     * Prevents scheduling onto slow efficiency cores which causes multi-threading barrier stalls
-     * and excessive thermal dissipation on ARM big.LITTLE architectures.
+     * Computes CPU thread budget respecting user preference, processor topology, and live
+     * thermal status. Caps severe heat to 2 threads and critical heat to 1 thread.
      */
     fun getAdaptiveThreadCount(profile: PerformanceMode, requestedThreads: Int): Int {
-        val totalCores = Runtime.getRuntime().availableProcessors()
-        // Mobile SoCs (Snapdragon, Dimensity, Tensor) typically have 3-4 performance cores.
-        // Pinning 4 threads yields maximum speed while keeping silicon temperatures cool.
+        val totalCores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
         val maxPerfThreads = if (totalCores >= 8) 4 else (totalCores - 1).coerceAtLeast(2)
 
         val baseThreads = when (profile) {
             PerformanceMode.ECO -> 2
             PerformanceMode.BALANCED -> requestedThreads.coerceIn(2, maxPerfThreads)
-            PerformanceMode.PERFORMANCE -> maxPerfThreads
+            PerformanceMode.PERFORMANCE -> requestedThreads.coerceIn(2, totalCores.coerceAtMost(8))
         }
 
-        // Dynamic thermal throttling based on real Android OS thermal status
         return when (_thermalState.value) {
-            DeviceThermalState.NOMINAL -> baseThreads
-            DeviceThermalState.LIGHT -> baseThreads
+            DeviceThermalState.NOMINAL, DeviceThermalState.LIGHT -> baseThreads
             DeviceThermalState.MODERATE -> (baseThreads - 1).coerceAtLeast(2)
-            DeviceThermalState.SEVERE -> 2 // Force drop to 2 threads to cool down SoC
-            DeviceThermalState.CRITICAL -> 1 // Emergency single-thread fallback to protect device
+            DeviceThermalState.SEVERE -> minOf(baseThreads, 2)
+            DeviceThermalState.CRITICAL -> 1
         }
     }
 
+    internal fun setThermalStateForTest(state: DeviceThermalState) {
+        applyThermalState(state)
+    }
+
     fun cleanup() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && powerManager != null && thermalListener != null) {
+        val listener = thermalListener
+        thermalListener = null
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && powerManager != null && listener != null) {
             try {
-                powerManager.removeThermalStatusListener(thermalListener!!)
-            } catch (_: Exception) {}
+                powerManager.removeThermalStatusListener(listener)
+            } catch (_: Exception) {
+            }
         }
-        try {
-            context.unregisterReceiver(batteryReceiver)
-        } catch (_: Exception) {}
+        if (batteryReceiverRegistered) {
+            batteryReceiverRegistered = false
+            try {
+                context.unregisterReceiver(batteryReceiver)
+            } catch (_: Exception) {
+            }
+        }
     }
 }

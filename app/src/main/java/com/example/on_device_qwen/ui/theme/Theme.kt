@@ -31,7 +31,7 @@ val ChatGptGreen       = Color(0xFF0369A1)
 val QwenPrimary        = Color(0xFF0369A1)
 val QwenPrimaryDark    = Color(0xFF083358)
 val QwenSecondary      = Color(0xFF38BDF8)
-val QwenError          = Color(0xFFDC2626)
+val QwenError          = Color(0xFFB91C1C)
 
 val DarkBackground     = Color(0xFF0B0C0F)
 val DarkSurface        = Color(0xFF121419)

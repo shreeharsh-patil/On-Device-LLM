@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
@@ -258,11 +259,14 @@ fun SovereignBanner(
                             .padding(vertical = 4.dp),
                     )
                     if (!actionLabel.isNullOrBlank() && onAction != null) {
-                        TextButton(onClick = onAction) {
+                        TextButton(
+                            onClick = onAction,
+                            modifier = Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp),
+                        ) {
                             Text(
                                 text = actionLabel,
                                 style = SovereignTypography.actionLabel,
-                                color = palette.dot,
+                                color = palette.onContainer,
                             )
                         }
                     }

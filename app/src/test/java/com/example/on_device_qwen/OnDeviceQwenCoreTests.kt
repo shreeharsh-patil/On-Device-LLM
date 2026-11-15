@@ -5,8 +5,16 @@ import com.example.on_device_qwen.domain.engine.GgufMetadataParser
 import com.example.on_device_qwen.domain.engine.InferenceEngineFactory
 import com.example.on_device_qwen.model.BackendType
 import com.example.on_device_qwen.model.EngineType
+import com.example.on_device_qwen.ui.components.IncrementalMarkdownParser
 import com.example.on_device_qwen.ui.components.MarkdownBlock
+import com.example.on_device_qwen.ui.components.NodeShape
+import com.example.on_device_qwen.ui.components.ParsedMermaidDiagram
+import com.example.on_device_qwen.ui.components.assignFlowchartLayers
+import com.example.on_device_qwen.ui.components.formatLatexSymbols
 import com.example.on_device_qwen.ui.components.parseMarkdownBlocks
+import com.example.on_device_qwen.ui.components.parseMermaidDiagram
+import com.example.on_device_qwen.ui.components.parseSimpleGraph
+import com.example.on_device_qwen.ui.components.resolveThinkingExpandedState
 import org.junit.Assert.*
 import org.junit.Test
 import java.io.File
@@ -165,45 +173,131 @@ class OnDeviceQwenCoreTests {
     }
 
     @Test
-    fun testSqlLikeWildcardEscaping() {
-        val rawQuery = "100% discount on _items_"
-        val escaped = rawQuery.trim()
-            .replace("\\", "\\\\")
-            .replace("%", "\\%")
-            .replace("_", "\\_")
+    fun testIncrementalMarkdownParserCommitsStablePrefixAndHandlesResets() {
+        val parser = IncrementalMarkdownParser()
+        val fullMarkdown = """
+            # Architecture
 
-        assertEquals("100\\% discount on \\_items\\_", escaped)
+            First completed paragraph.
+
+            ```kotlin
+            fun run() = 42
+            ```
+
+            Final trailing line
+        """.trimIndent()
+
+        var lastBlocks = emptyList<MarkdownBlock>()
+        for (len in 1..fullMarkdown.length step 7) {
+            lastBlocks = parser.parse(fullMarkdown.substring(0, len), isStreaming = true)
+        }
+        val finalizedBlocks = parser.parse(fullMarkdown, isStreaming = false)
+
+        assertTrue("Expected prefix blocks to commit incrementally while streaming", parser.committedBlockCount >= 3)
+        assertEquals(parseMarkdownBlocks(fullMarkdown), finalizedBlocks)
+        assertTrue(lastBlocks.isNotEmpty())
+
+        // Verify reset on a completely different message/prompt
+        val nextMsg = "## Replaced\n\nFresh content"
+        val resetBlocks = parser.parse(nextMsg, isStreaming = false)
+        assertEquals(parseMarkdownBlocks(nextMsg), resetBlocks)
     }
 
     @Test
-    fun testRegenerateMessageFilterLogic() {
-        // Simulates the bug fix in ChatViewModel.regenerateLastResponse():
-        // Finding and removing specifically the last bot message, not simply currentMsgs.lastOrNull()
-        val user1 = com.example.on_device_qwen.model.ChatMessage(id = 1L, conversationId = "c1", text = "Hello", isUser = true)
-        val bot1 = com.example.on_device_qwen.model.ChatMessage(id = 2L, conversationId = "c1", text = "Hi there!", isUser = false)
-        val user2 = com.example.on_device_qwen.model.ChatMessage(id = 3L, conversationId = "c1", text = "How are you?", isUser = true)
+    fun testStreamingUnclosedDiagramAndCodeFlags() {
+        val streamingMermaid = """
+            ```mermaid
+            graph TD
+            A[Start] --> B[Running]
+        """.trimIndent()
+        val streamingBlocks = parseMarkdownBlocks(streamingMermaid)
+        val diagram = streamingBlocks.filterIsInstance<MarkdownBlock.Diagram>().single()
+        assertFalse("Unclosed mermaid fence during streaming must report isClosed=false", diagram.isClosed)
 
-        val listWithTrailingUser = listOf(user1, bot1, user2)
-        val lastBotMsg = listWithTrailingUser.lastOrNull { !it.isUser }
-        val filtered = if (lastBotMsg != null) listWithTrailingUser.filterNot { it.id == lastBotMsg.id } else listWithTrailingUser
+        val closedMermaid = "$streamingMermaid\n```"
+        val closedDiagram = parseMarkdownBlocks(closedMermaid).filterIsInstance<MarkdownBlock.Diagram>().single()
+        assertTrue("Closed mermaid fence must report isClosed=true", closedDiagram.isClosed)
 
-        assertEquals(2, filtered.size)
-        assertEquals(listOf(1L, 3L), filtered.map { it.id })
+        val unclosedCode = "```rust\nfn main() {"
+        val codeBlock = parseMarkdownBlocks(unclosedCode).filterIsInstance<MarkdownBlock.Code>().single()
+        assertFalse("Unclosed code fence must report isClosed=false", codeBlock.isClosed)
     }
 
     @Test
-    fun testReasoningTagParser() {
-        val raw = "<think>\nThinking step by step...\n</think>\nHere is the answer."
-        val openTag = "<think>"
-        val closeTag = "</think>"
-        val openIdx = raw.indexOf(openTag)
-        val afterOpen = raw.substring(openIdx + openTag.length)
-        val closeIdx = afterOpen.indexOf(closeTag)
+    fun testMermaidFlowchartEdgesShapesSubgraphsAndCycleSafety() {
+        val mermaid = """
+            flowchart LR
+            subgraph Core[Execution Engine]
+                A([Input]) --> B{Valid?}
+            end
+            B -->|Yes| C[Run Inference]
+            B -. Retry .-> A
+            C -- Done --> D((End))
+        """.trimIndent()
 
-        val think = afterOpen.substring(0, closeIdx).trim()
-        val answer = afterOpen.substring(closeIdx + closeTag.length).trimStart('\n', '\r', ' ')
+        val graph = parseSimpleGraph(mermaid)
+        assertNotNull("Flowchart should parse cleanly", graph)
+        graph!!
+        assertTrue("flowchart LR must be horizontal", graph.isHorizontal)
 
-        assertEquals("Thinking step by step...", think)
-        assertEquals("Here is the answer.", answer)
+        val byId = graph.nodes.associateBy { it.id }
+        assertEquals(NodeShape.STADIUM, byId["A"]?.shape)
+        assertEquals(NodeShape.DIAMOND, byId["B"]?.shape)
+        assertEquals(NodeShape.RECTANGLE, byId["C"]?.shape)
+        assertEquals(NodeShape.CIRCLE, byId["D"]?.shape)
+        assertEquals("Execution Engine", byId["A"]?.subgraph)
+        assertEquals("Execution Engine", byId["B"]?.subgraph)
+
+        assertEquals(4, graph.edges.size)
+        assertEquals("Yes", graph.edges[1].label)
+        assertEquals("Retry", graph.edges[2].label)
+        assertTrue("Dashed edge -.-> should preserve isDashed", graph.edges[2].isDashed)
+        assertEquals("Done", graph.edges[3].label)
+
+        // Ensure cyclic back-edge A <- B terminates cleanly in layered topological assignment
+        val layers = assignFlowchartLayers(graph)
+        assertTrue("Layered DAG layout must place all nodes", layers.flatten().size == graph.nodes.size)
+
+        // Sequence diagram parsing
+        val sequence = """
+            sequenceDiagram
+            participant U as User
+            participant M as Model
+            U->>M: Send prompt
+            M-->>U: Stream tokens
+            M->>M: Update KV cache
+        """.trimIndent()
+        val seqParsed = parseMermaidDiagram(sequence) as? ParsedMermaidDiagram.Sequence
+        assertNotNull("Sequence diagram must parse offline", seqParsed)
+        assertEquals(listOf("User", "Model"), seqParsed!!.data.participants.map { it.label })
+        assertEquals(3, seqParsed.data.messages.size)
+        assertTrue(seqParsed.data.messages[1].isDashed)
+
+        // State diagram parsing
+        val stateDiag = """
+            stateDiagram-v2
+            [*] --> Idle
+            Idle --> Generating : prompt
+            Generating --> [*] : complete
+        """.trimIndent()
+        val stateParsed = parseMermaidDiagram(stateDiag) as? ParsedMermaidDiagram.Flowchart
+        assertNotNull("State diagram must parse offline", stateParsed)
+        assertTrue(stateParsed!!.graph.edges.any { it.label == "prompt" })
+    }
+
+    @Test
+    fun testLatexMathFormatterAndThinkingStateResolution() {
+        val formatted = formatLatexSymbols("""\sum_{i=1}^n \frac{\alpha + \beta}{2} \neq \infty""")
+        assertTrue(formatted.contains("∑"))
+        assertTrue(formatted.contains("((α + β) / 2)") || formatted.contains("(α + β / 2)"))
+        assertTrue(formatted.contains("≠"))
+        assertTrue(formatted.contains("∞"))
+
+        // Thinking drawer visibility state rules
+        assertFalse("Completed thought process should collapse by default", resolveThinkingExpandedState(false, "done", null))
+        assertFalse("Blank live thinking should stay collapsed until tokens arrive", resolveThinkingExpandedState(true, "   ", null))
+        assertTrue("Active non-blank reasoning should auto-expand", resolveThinkingExpandedState(true, "Step 1", null))
+        assertFalse("User collapse override must win even while actively thinking", resolveThinkingExpandedState(true, "Step 1", false))
+        assertTrue("User expand override must win on completed messages", resolveThinkingExpandedState(false, "done", true))
     }
 }

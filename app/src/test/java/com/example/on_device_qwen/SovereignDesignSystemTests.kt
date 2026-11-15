@@ -102,29 +102,56 @@ class SovereignDesignSystemTests {
     @Test
     fun primaryAndSecondaryTextMeetWcagAaContrast() {
         for (palette in listOf(LightSovereignColors, DarkSovereignColors)) {
-            assertTrue(
-                "textPrimary on bgCanvas must exceed 4.5:1",
-                contrastRatio(palette.textPrimary, palette.bgCanvas) >= 4.5,
+            val surfaces = listOf(
+                "bgCanvas" to palette.bgCanvas,
+                "surfaceLow" to palette.surfaceLow,
+                "surfaceBase" to palette.surfaceBase,
+                "surfaceHigh" to palette.surfaceHigh,
+                "surfaceHighest" to palette.surfaceHighest,
+                "codeBackground" to palette.codeBackground,
+                "codeHeader" to palette.codeHeader,
             )
-            assertTrue(
-                "textSecondary on surfaceLow must exceed 4.5:1",
-                contrastRatio(palette.textSecondary, palette.surfaceLow) >= 4.5,
+            val foregrounds = listOf(
+                "textPrimary" to palette.textPrimary,
+                "textSecondary" to palette.textSecondary,
+                "textMuted" to palette.textMuted,
+                "accentPrimary" to palette.accentPrimary,
+                "llamaViolet" to palette.llamaViolet,
+                "success" to palette.success,
+                "amber" to palette.amber,
+                "error" to palette.error,
             )
-            assertTrue(
-                "textMuted on surfaceBase must exceed 4.5:1",
-                contrastRatio(palette.textMuted, palette.surfaceBase) >= 4.5,
+            for ((fgName, fg) in foregrounds) {
+                for ((bgName, bg) in surfaces) {
+                    val ratio = contrastRatio(fg, bg)
+                    assertTrue(
+                        "$fgName on $bgName (isDark=${palette.isDark}) must meet WCAG AA >= 4.5:1 (was $ratio)",
+                        ratio >= 4.5,
+                    )
+                }
+            }
+
+            val containerPairs = listOf(
+                Triple("onAccent/accentPrimary", palette.onAccent, palette.accentPrimary),
+                Triple("onCtaInk/ctaInk", palette.onCtaInk, palette.ctaInk),
+                Triple("onAccentContainer/accentContainer", palette.onAccentContainer, palette.accentContainer),
+                Triple("onLlamaVioletContainer/llamaVioletContainer", palette.onLlamaVioletContainer, palette.llamaVioletContainer),
+                Triple("onSuccessContainer/successContainer", palette.onSuccessContainer, palette.successContainer),
+                Triple("onAmberContainer/amberContainer", palette.onAmberContainer, palette.amberContainer),
+                Triple("onErrorContainer/errorContainer", palette.onErrorContainer, palette.errorContainer),
             )
+            for ((label, fg, bg) in containerPairs) {
+                val ratio = contrastRatio(fg, bg)
+                assertTrue(
+                    "$label (isDark=${palette.isDark}) must meet WCAG AA >= 4.5:1 (was $ratio)",
+                    ratio >= 4.5,
+                )
+            }
+
+            val m3 = palette.toMaterial3ColorScheme()
             assertTrue(
-                "onAccent on accentPrimary must exceed 4.5:1",
-                contrastRatio(palette.onAccent, palette.accentPrimary) >= 4.5,
-            )
-            assertTrue(
-                "onCtaInk on ctaInk must exceed 4.5:1",
-                contrastRatio(palette.onCtaInk, palette.ctaInk) >= 4.5,
-            )
-            assertTrue(
-                "onAccentContainer on accentContainer must exceed 4.5:1",
-                contrastRatio(palette.onAccentContainer, palette.accentContainer) >= 4.5,
+                "Material onError on error must meet WCAG AA >= 4.5:1",
+                contrastRatio(m3.onError, m3.error) >= 4.5,
             )
         }
     }

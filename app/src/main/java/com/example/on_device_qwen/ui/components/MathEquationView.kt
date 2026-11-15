@@ -1,44 +1,42 @@
 package com.example.on_device_qwen.ui.components
 
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.buildAnnotatedString
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.on_device_qwen.ui.designsystem.SovereignElevation
+import com.example.on_device_qwen.ui.designsystem.SovereignTheme
+import com.example.on_device_qwen.ui.designsystem.SovereignTypography
 
 /**
- * Renders mathematical block equations (like $$ ... $$) in a refined LaTeX-inspired presentation.
+ * Renders mathematical block equations ($$ ... $$) using Sovereign editorial serif typography
+ * and theme-aware Vellum/Obsidian surface contrast.
  */
 @Composable
 fun MathEquationView(
     equation: String,
     modifier: Modifier = Modifier
 ) {
+    val colors = SovereignTheme.colors
     val scrollState = rememberScrollState()
     val formattedMath = remember(equation) { formatLatexSymbols(equation.trim()) }
 
     Surface(
-        shape = RoundedCornerShape(8.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)),
+        shape = SovereignTheme.shapes.sm,
+        color = colors.surfaceLow,
+        border = BorderStroke(SovereignElevation.hairlineWidth, colors.hairlineSubtle),
         modifier = modifier
             .fillMaxWidth()
             .padding(vertical = 4.dp)
@@ -52,19 +50,22 @@ fun MathEquationView(
         ) {
             Text(
                 text = formattedMath,
-                fontFamily = FontFamily.Serif,
-                fontSize = 16.sp,
-                lineHeight = 24.sp,
+                fontFamily = SovereignTypography.EditorialSerifFontFamily,
+                fontSize = 17.sp,
+                lineHeight = 25.sp,
                 fontStyle = FontStyle.Italic,
-                color = MaterialTheme.colorScheme.onSurface,
+                color = colors.textPrimary,
                 textAlign = TextAlign.Center
             )
         }
     }
 }
 
+private val FRAC_REGEX = Regex("""\\frac\{([^{}]+)\}\{([^{}]+)\}""")
+private val TEXT_CMD_REGEX = Regex("""\\(?:text|mathrm|mathbf|mathit)\{([^{}]*)\}""")
+
 /**
- * Replaces common LaTeX math commands with unicode mathematical typography.
+ * Replaces common LaTeX math commands with crisp Unicode mathematical typography.
  */
 fun formatLatexSymbols(raw: String): String {
     var text = raw
@@ -77,9 +78,14 @@ fun formatLatexSymbols(raw: String): String {
         .replace("\\lambda", "λ")
         .replace("\\mu", "μ")
         .replace("\\pi", "π")
+        .replace("\\rho", "ρ")
         .replace("\\sigma", "σ")
+        .replace("\\phi", "φ")
+        .replace("\\psi", "ψ")
         .replace("\\omega", "ω")
         .replace("\\Delta", "Δ")
+        .replace("\\Theta", "Θ")
+        .replace("\\Lambda", "Λ")
         .replace("\\Sigma", "Σ")
         .replace("\\Omega", "Ω")
         .replace("\\infty", "∞")
@@ -93,21 +99,37 @@ fun formatLatexSymbols(raw: String): String {
         .replace("\\leq", "≤")
         .replace("\\geq", "≥")
         .replace("\\approx", "≈")
-        .replace("\\to", "→")
+        .replace("\\equiv", "≡")
+        .replace("\\leftrightarrow", "↔")
+        .replace("\\Rightarrow", "⇒")
+        .replace("\\leftarrow", "←")
         .replace("\\rightarrow", "→")
+        .replace("\\to", "→")
         .replace("\\sqrt", "√")
         .replace("\\partial", "∂")
         .replace("\\nabla", "∇")
         .replace("\\cdot", "·")
+        .replace("\\forall", "∀")
+        .replace("\\exists", "∃")
+        .replace("\\emptyset", "∅")
+        .replace("\\notin", "∉")
         .replace("\\in", "∈")
         .replace("\\subset", "⊂")
+        .replace("\\subseteq", "⊆")
         .replace("\\cup", "∪")
         .replace("\\cap", "∩")
+        .replace("\\degree", "°")
+        .replace("^2", "²")
+        .replace("^3", "³")
+        .replace("^n", "ⁿ")
 
-    // Handle fractions: \frac{a}{b} -> (a / b)
-    val fracRegex = Regex("""\\frac\{([^}]+)\}\{([^}]+)\}""")
-    text = fracRegex.replace(text) { match ->
-        "(${match.groupValues[1]} / ${match.groupValues[2]})"
+    text = TEXT_CMD_REGEX.replace(text) { it.groupValues[1] }
+
+    // Unwrap up to 2 levels of nested \frac{a}{b} cleanly
+    repeat(2) {
+        text = FRAC_REGEX.replace(text) { match ->
+            "(${match.groupValues[1]} / ${match.groupValues[2]})"
+        }
     }
 
     return text

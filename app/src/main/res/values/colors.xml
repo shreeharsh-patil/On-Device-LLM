@@ -8,6 +8,5 @@
     <color name="sovereign_on_cyan_dark">#FF06151E</color>
     <color name="ink_dark">#FF121316</color>
     <color name="ink_light">#FFF1F2F4</color>
-    <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
 </resources>

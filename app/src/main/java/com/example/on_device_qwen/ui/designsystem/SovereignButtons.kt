@@ -86,7 +86,19 @@ fun SovereignIconButton(
         label = "SovereignIconButtonBg",
     )
 
-    Box(
+    Surface(
+        onClick = {
+            if (hapticFeedback && hapticsEnabled) {
+                haptics.performHapticFeedback(hapticType)
+            }
+            onClick()
+        },
+        enabled = enabled,
+        shape = shape,
+        color = Color.Transparent,
+        tonalElevation = 0.dp,
+        shadowElevation = 0.dp,
+        interactionSource = interactionSource,
         modifier = modifier
             .sizeIn(minWidth = 48.dp, minHeight = 48.dp)
             .semantics(mergeDescendants = true) {
@@ -94,30 +106,23 @@ fun SovereignIconButton(
                 this.contentDescription = contentDescription
                 if (selected) this.selected = true
             },
-        contentAlignment = Alignment.Center,
     ) {
-        Surface(
-            onClick = {
-                if (hapticFeedback && hapticsEnabled) {
-                    haptics.performHapticFeedback(hapticType)
-                }
-                onClick()
-            },
-            enabled = enabled,
-            shape = shape,
-            color = resolvedContainerColor,
-            contentColor = resolvedContentColor,
-            border = border,
-            tonalElevation = 0.dp,
-            shadowElevation = 0.dp,
-            interactionSource = interactionSource,
-            modifier = Modifier
-                .size(visualSize)
-                .scale(scale),
-        ) {
-            Box(contentAlignment = Alignment.Center) {
-                CompositionLocalProvider(LocalContentColor provides resolvedContentColor) {
-                    content()
+        Box(contentAlignment = Alignment.Center) {
+            Surface(
+                shape = shape,
+                color = resolvedContainerColor,
+                contentColor = resolvedContentColor,
+                border = border,
+                tonalElevation = 0.dp,
+                shadowElevation = 0.dp,
+                modifier = Modifier
+                    .size(visualSize)
+                    .scale(scale),
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    CompositionLocalProvider(LocalContentColor provides resolvedContentColor) {
+                        content()
+                    }
                 }
             }
         }

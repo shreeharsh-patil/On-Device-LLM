@@ -3,11 +3,16 @@ package com.example.on_device_qwen.ui.components
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -17,12 +22,15 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import com.example.on_device_qwen.ui.designsystem.SovereignElevation
+import com.example.on_device_qwen.ui.designsystem.SovereignTheme
+import com.example.on_device_qwen.ui.designsystem.SovereignTypography
 
 enum class TableAlignment {
     LEFT, CENTER, RIGHT
 }
 
+@androidx.compose.runtime.Immutable
 data class MarkdownTableData(
     val headers: List<String>,
     val alignments: List<TableAlignment>,
@@ -30,13 +38,12 @@ data class MarkdownTableData(
 )
 
 /**
- * Modern ChatGPT-style Markdown Table component.
+ * Responsive Markdown Table component styled with Sovereign Vellum/Obsidian tokens.
  * Features:
  * - Fluid horizontal scrolling for wide datasets
- * - Contrasting header row with bold typography
- * - Alternating zebra stripes on data rows
- * - Proper column text alignment (left, center, right)
- * - Rounded borders matching ChatGPT aesthetic
+ * - Contrasting header row and subtle hairline borders
+ * - Alternating zebra striping on data rows
+ * - Accurate column alignment (left, center, right) applied to both header and data cells
  */
 @Composable
 fun MarkdownTableView(
@@ -45,50 +52,45 @@ fun MarkdownTableView(
 ) {
     if (table.headers.isEmpty()) return
 
+    val colors = SovereignTheme.colors
     val columnCount = table.headers.size
     val scrollState = rememberScrollState()
 
     Surface(
-        shape = RoundedCornerShape(10.dp),
-        color = MaterialTheme.colorScheme.surface,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
+        shape = SovereignTheme.shapes.sm,
+        color = colors.surfaceHigh,
+        border = BorderStroke(SovereignElevation.hairlineWidth, colors.hairlineStrong),
         modifier = modifier
             .fillMaxWidth()
             .padding(vertical = 4.dp)
     ) {
         Column(
             modifier = Modifier
-                .fillMaxWidth()
                 .horizontalScroll(scrollState)
+                .width(IntrinsicSize.Max)
         ) {
             // Header Row
             Row(
                 modifier = Modifier
-                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f))
+                    .fillMaxWidth()
+                    .background(colors.surfaceBase)
                     .padding(vertical = 10.dp, horizontal = 4.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 for (colIndex in 0 until columnCount) {
                     val headerText = table.headers.getOrElse(colIndex) { "" }
                     val alignment = table.alignments.getOrElse(colIndex) { TableAlignment.LEFT }
-                    val textAlign = when (alignment) {
-                        TableAlignment.LEFT -> TextAlign.Start
-                        TableAlignment.CENTER -> TextAlign.Center
-                        TableAlignment.RIGHT -> TextAlign.End
-                    }
+                    val textAlign = alignment.toTextAlign()
 
                     Box(
                         modifier = Modifier
-                            .widthIn(min = 90.dp, max = 220.dp)
+                            .widthIn(min = 96.dp, max = 220.dp)
                             .padding(horizontal = 12.dp)
                     ) {
-                        Text(
+                        FormattedInlineText(
                             text = headerText,
-                            style = MaterialTheme.typography.labelMedium.copy(
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 13.sp
-                            ),
-                            color = MaterialTheme.colorScheme.onSurface,
+                            color = colors.textPrimary,
+                            textStyle = SovereignTypography.bodyCompact.copy(fontWeight = FontWeight.SemiBold),
                             textAlign = textAlign,
                             modifier = Modifier.fillMaxWidth()
                         )
@@ -97,21 +99,21 @@ fun MarkdownTableView(
             }
 
             HorizontalDivider(
-                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f),
-                thickness = 1.dp
+                color = colors.hairlineStrong,
+                thickness = SovereignElevation.hairlineWidth
             )
 
             // Data Rows
             table.rows.forEachIndexed { rowIndex, rowCells ->
-                val isEven = rowIndex % 2 == 0
-                val rowBackground = if (isEven) {
+                val rowBackground = if (rowIndex % 2 == 0) {
                     Color.Transparent
                 } else {
-                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f)
+                    colors.surfaceLow
                 }
 
                 Row(
                     modifier = Modifier
+                        .fillMaxWidth()
                         .background(rowBackground)
                         .padding(vertical = 9.dp, horizontal = 4.dp),
                     verticalAlignment = Alignment.CenterVertically
@@ -119,20 +121,18 @@ fun MarkdownTableView(
                     for (colIndex in 0 until columnCount) {
                         val cellText = rowCells.getOrElse(colIndex) { "" }
                         val alignment = table.alignments.getOrElse(colIndex) { TableAlignment.LEFT }
-                        val textAlign = when (alignment) {
-                            TableAlignment.LEFT -> TextAlign.Start
-                            TableAlignment.CENTER -> TextAlign.Center
-                            TableAlignment.RIGHT -> TextAlign.End
-                        }
+                        val textAlign = alignment.toTextAlign()
 
                         Box(
                             modifier = Modifier
-                                .widthIn(min = 90.dp, max = 220.dp)
+                                .widthIn(min = 96.dp, max = 220.dp)
                                 .padding(horizontal = 12.dp)
                         ) {
                             FormattedInlineText(
                                 text = cellText,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.9f),
+                                color = colors.textPrimary,
+                                textStyle = SovereignTypography.bodyCompact,
+                                textAlign = textAlign,
                                 modifier = Modifier.fillMaxWidth()
                             )
                         }
@@ -141,11 +141,17 @@ fun MarkdownTableView(
 
                 if (rowIndex < table.rows.lastIndex) {
                     HorizontalDivider(
-                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f),
-                        thickness = 0.5.dp
+                        color = colors.hairlineSubtle,
+                        thickness = SovereignElevation.hairlineWidth
                     )
                 }
             }
         }
     }
+}
+
+private fun TableAlignment.toTextAlign(): TextAlign = when (this) {
+    TableAlignment.LEFT -> TextAlign.Start
+    TableAlignment.CENTER -> TextAlign.Center
+    TableAlignment.RIGHT -> TextAlign.End
 }

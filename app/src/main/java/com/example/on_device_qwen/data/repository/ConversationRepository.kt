@@ -3,16 +3,20 @@ package com.example.on_device_qwen.data.repository
 import android.content.ContentValues
 import android.content.Context
 import android.database.Cursor
+import android.database.sqlite.SQLiteDatabase
 import com.example.on_device_qwen.data.db.ChatDatabaseHelper
 import com.example.on_device_qwen.model.BenchmarkMetrics
 import com.example.on_device_qwen.model.ChatMessage
 import com.example.on_device_qwen.model.ConversationSession
+import com.example.on_device_qwen.model.MessageIdGenerator
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.File
 
 class ConversationRepository(context: Context) : com.example.on_device_qwen.model.IMemoryRepository {
 
-    private val dbHelper = ChatDatabaseHelper(context.applicationContext)
+    private val appContext = context.applicationContext
+    private val dbHelper = ChatDatabaseHelper(appContext)
 
     suspend fun getAllConversations(): List<ConversationSession> = withContext(Dispatchers.IO) {
         val list = mutableListOf<ConversationSession>()
@@ -49,6 +53,9 @@ class ConversationRepository(context: Context) : com.example.on_device_qwen.mode
             if (it.moveToFirst()) cursorToConversation(it) else null
         }
     }
+
+    suspend fun getConversationById(conversationId: String): ConversationSession? =
+        getConversation(conversationId)
 
     suspend fun saveConversation(session: ConversationSession) = withContext(Dispatchers.IO) {
         val db = dbHelper.writableDatabase
@@ -98,9 +105,12 @@ class ConversationRepository(context: Context) : com.example.on_device_qwen.mode
 
     suspend fun deleteConversation(id: String) = withContext(Dispatchers.IO) {
         val db = dbHelper.writableDatabase
-        // BUG-005 FIX: Use a transaction so both deletes are atomic.
-        // FK CASCADE (ON DELETE CASCADE) handles messages automatically when enabled,
-        // but we keep the explicit delete as a belt-and-suspenders safety measure.
+        val imagePaths = collectImagePaths(
+            db,
+            "${ChatDatabaseHelper.COL_MSG_CONV_ID} = ? AND ${ChatDatabaseHelper.COL_MSG_IMAGE_PATH} IS NOT NULL",
+            arrayOf(id)
+        )
+        // BUG-005 FIX: Use a transaction so all deletes are atomic.
         db.beginTransaction()
         try {
             db.delete(
@@ -122,12 +132,26 @@ class ConversationRepository(context: Context) : com.example.on_device_qwen.mode
         } finally {
             db.endTransaction()
         }
+        cleanupOrphanedVlmImages(imagePaths, db)
     }
 
     suspend fun clearAllConversations() = withContext(Dispatchers.IO) {
         val db = dbHelper.writableDatabase
-        db.delete(ChatDatabaseHelper.TABLE_MESSAGES, null, null)
-        db.delete(ChatDatabaseHelper.TABLE_CONVERSATIONS, null, null)
+        val imagePaths = collectImagePaths(
+            db,
+            "${ChatDatabaseHelper.COL_MSG_IMAGE_PATH} IS NOT NULL",
+            null
+        )
+        db.beginTransaction()
+        try {
+            db.delete(ChatDatabaseHelper.TABLE_MESSAGES, null, null)
+            db.delete(ChatDatabaseHelper.TABLE_SUMMARIES, null, null)
+            db.delete(ChatDatabaseHelper.TABLE_CONVERSATIONS, null, null)
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+        cleanupOrphanedVlmImages(imagePaths, db)
     }
 
     suspend fun searchConversations(query: String): List<ConversationSession> = withContext(Dispatchers.IO) {
@@ -168,7 +192,7 @@ class ConversationRepository(context: Context) : com.example.on_device_qwen.mode
             arrayOf(conversationId),
             null,
             null,
-            "${ChatDatabaseHelper.COL_MSG_TIMESTAMP} ASC"
+            "${ChatDatabaseHelper.COL_MSG_TIMESTAMP} ASC, ${ChatDatabaseHelper.COL_MSG_ID} ASC"
         )
         cursor.use {
             while (it.moveToNext()) {
@@ -180,8 +204,9 @@ class ConversationRepository(context: Context) : com.example.on_device_qwen.mode
 
     suspend fun saveMessage(message: ChatMessage) = withContext(Dispatchers.IO) {
         val db = dbHelper.writableDatabase
+        val resolvedId = if (message.id <= 0L) MessageIdGenerator.nextId() else message.id
         val values = ContentValues().apply {
-            put(ChatDatabaseHelper.COL_MSG_ID, message.id)
+            put(ChatDatabaseHelper.COL_MSG_ID, resolvedId)
             put(ChatDatabaseHelper.COL_MSG_CONV_ID, message.conversationId)
             put(ChatDatabaseHelper.COL_MSG_TEXT, message.text)
             put(ChatDatabaseHelper.COL_MSG_IS_USER, if (message.isUser) 1 else 0)
@@ -189,86 +214,317 @@ class ConversationRepository(context: Context) : com.example.on_device_qwen.mode
             put(ChatDatabaseHelper.COL_MSG_IMAGE_PATH, message.imagePath)
             put(ChatDatabaseHelper.COL_MSG_THINK_TEXT, message.thinkText)
             put(ChatDatabaseHelper.COL_MSG_IS_ERROR, if (message.isError) 1 else 0)
-            message.benchmark?.let { b ->
-                put(ChatDatabaseHelper.COL_MSG_TTFT_MS, b.ttftMs)
-                put(ChatDatabaseHelper.COL_MSG_DECODE_TPS, b.decodeTps)
-                put(ChatDatabaseHelper.COL_MSG_DECODE_TOKENS, b.decodeTokens)
-                put(ChatDatabaseHelper.COL_MSG_DURATION_MS, b.totalDurationMs)
-                put(ChatDatabaseHelper.COL_MSG_BACKEND, b.backend)
+            put(ChatDatabaseHelper.COL_MSG_MODEL_NAME, message.modelName)
+            put(ChatDatabaseHelper.COL_MSG_BACKEND_LABEL, message.backendLabel)
+            put(ChatDatabaseHelper.COL_MSG_IS_CANCELLED, if (message.isCancelled) 1 else 0)
+            val b = message.benchmark
+            put(ChatDatabaseHelper.COL_MSG_TTFT_MS, b?.ttftMs ?: 0L)
+            put(ChatDatabaseHelper.COL_MSG_DECODE_TPS, b?.decodeTps ?: 0.0)
+            put(ChatDatabaseHelper.COL_MSG_DECODE_TOKENS, b?.decodeTokens ?: 0)
+            put(ChatDatabaseHelper.COL_MSG_DURATION_MS, b?.totalDurationMs ?: 0L)
+            put(ChatDatabaseHelper.COL_MSG_BACKEND, b?.backend ?: "CPU")
+            put(ChatDatabaseHelper.COL_MSG_PREFILL_TPS, b?.prefillTps ?: 0.0)
+            put(ChatDatabaseHelper.COL_MSG_PREFILL_TOKENS, b?.prefillTokens ?: 0)
+        }
+        db.beginTransaction()
+        try {
+            db.insertWithOnConflict(
+                ChatDatabaseHelper.TABLE_MESSAGES,
+                null,
+                values,
+                SQLiteDatabase.CONFLICT_REPLACE
+            )
+            // Keep parent conversation preview and timestamp synchronized atomically.
+            val convValues = ContentValues().apply {
+                put(ChatDatabaseHelper.COL_CONV_UPDATED_AT, message.timestamp)
+                put(ChatDatabaseHelper.COL_CONV_PREVIEW, message.text.take(80))
             }
+            db.update(
+                ChatDatabaseHelper.TABLE_CONVERSATIONS,
+                convValues,
+                "${ChatDatabaseHelper.COL_CONV_ID} = ?",
+                arrayOf(message.conversationId)
+            )
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
         }
-        db.insertWithOnConflict(
-            ChatDatabaseHelper.TABLE_MESSAGES,
-            null,
-            values,
-            android.database.sqlite.SQLiteDatabase.CONFLICT_REPLACE
-        )
-
-        // Update preview and updatedAt on parent conversation
-        val convValues = ContentValues().apply {
-            put(ChatDatabaseHelper.COL_CONV_UPDATED_AT, message.timestamp)
-            put(ChatDatabaseHelper.COL_CONV_PREVIEW, message.text.take(80))
-        }
-        db.update(
-            ChatDatabaseHelper.TABLE_CONVERSATIONS,
-            convValues,
-            "${ChatDatabaseHelper.COL_CONV_ID} = ?",
-            arrayOf(message.conversationId)
-        )
     }
 
     suspend fun deleteMessage(messageId: Long) = withContext(Dispatchers.IO) {
         val db = dbHelper.writableDatabase
-        db.delete(
-            ChatDatabaseHelper.TABLE_MESSAGES,
-            "${ChatDatabaseHelper.COL_MSG_ID} = ?",
-            arrayOf(messageId.toString())
-        )
+        var convId: String? = null
+        var imagePath: String? = null
+        db.beginTransaction()
+        try {
+            db.query(
+                ChatDatabaseHelper.TABLE_MESSAGES,
+                arrayOf(ChatDatabaseHelper.COL_MSG_CONV_ID, ChatDatabaseHelper.COL_MSG_IMAGE_PATH),
+                "${ChatDatabaseHelper.COL_MSG_ID} = ?",
+                arrayOf(messageId.toString()),
+                null,
+                null,
+                null
+            ).use { c ->
+                if (c.moveToFirst()) {
+                    convId = c.getString(0)
+                    imagePath = if (c.isNull(1)) null else c.getString(1)
+                }
+            }
+            db.delete(
+                ChatDatabaseHelper.TABLE_MESSAGES,
+                "${ChatDatabaseHelper.COL_MSG_ID} = ?",
+                arrayOf(messageId.toString())
+            )
+            convId?.let { refreshConversationPreview(db, it) }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+        imagePath?.let { cleanupOrphanedVlmImages(listOf(it), db) }
     }
 
     suspend fun deleteLastAssistantMessage(conversationId: String): Long? = withContext(Dispatchers.IO) {
         val db = dbHelper.writableDatabase
-        val cursor = db.rawQuery(
-            """
-            SELECT ${ChatDatabaseHelper.COL_MSG_ID} FROM ${ChatDatabaseHelper.TABLE_MESSAGES}
-            WHERE ${ChatDatabaseHelper.COL_MSG_CONV_ID} = ? AND ${ChatDatabaseHelper.COL_MSG_IS_USER} = 0
-            ORDER BY ${ChatDatabaseHelper.COL_MSG_TIMESTAMP} DESC LIMIT 1
-            """.trimIndent(),
-            arrayOf(conversationId)
-        )
         var lastId: Long? = null
-        cursor.use {
-            if (it.moveToFirst()) {
-                lastId = it.getLong(0)
+        var imagePath: String? = null
+        db.beginTransaction()
+        try {
+            db.rawQuery(
+                """
+                SELECT ${ChatDatabaseHelper.COL_MSG_ID}, ${ChatDatabaseHelper.COL_MSG_IMAGE_PATH}
+                FROM ${ChatDatabaseHelper.TABLE_MESSAGES}
+                WHERE ${ChatDatabaseHelper.COL_MSG_CONV_ID} = ? AND ${ChatDatabaseHelper.COL_MSG_IS_USER} = 0
+                ORDER BY ${ChatDatabaseHelper.COL_MSG_TIMESTAMP} DESC, ${ChatDatabaseHelper.COL_MSG_ID} DESC
+                LIMIT 1
+                """.trimIndent(),
+                arrayOf(conversationId)
+            ).use { c ->
+                if (c.moveToFirst()) {
+                    lastId = c.getLong(0)
+                    imagePath = if (c.isNull(1)) null else c.getString(1)
+                }
             }
+            lastId?.let { id ->
+                db.delete(
+                    ChatDatabaseHelper.TABLE_MESSAGES,
+                    "${ChatDatabaseHelper.COL_MSG_ID} = ?",
+                    arrayOf(id.toString())
+                )
+                db.delete(
+                    ChatDatabaseHelper.TABLE_SUMMARIES,
+                    "${ChatDatabaseHelper.COL_SUM_CONV_ID} = ?",
+                    arrayOf(conversationId)
+                )
+                refreshConversationPreview(db, conversationId)
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
         }
-        lastId?.let { id ->
-            db.delete(
-                ChatDatabaseHelper.TABLE_MESSAGES,
-                "${ChatDatabaseHelper.COL_MSG_ID} = ?",
-                arrayOf(id.toString())
-            )
-        }
+        imagePath?.let { cleanupOrphanedVlmImages(listOf(it), db) }
         lastId
     }
 
     suspend fun deleteMessagesAfter(conversationId: String, timestamp: Long) = withContext(Dispatchers.IO) {
         val db = dbHelper.writableDatabase
-        db.delete(
-            ChatDatabaseHelper.TABLE_MESSAGES,
-            "${ChatDatabaseHelper.COL_MSG_CONV_ID} = ? AND ${ChatDatabaseHelper.COL_MSG_TIMESTAMP} >= ?",
-            arrayOf(conversationId, timestamp.toString())
+        val selection = "${ChatDatabaseHelper.COL_MSG_CONV_ID} = ? AND ${ChatDatabaseHelper.COL_MSG_TIMESTAMP} >= ?"
+        val args = arrayOf(conversationId, timestamp.toString())
+        val imagePaths = collectImagePaths(
+            db,
+            "$selection AND ${ChatDatabaseHelper.COL_MSG_IMAGE_PATH} IS NOT NULL",
+            args
         )
+        db.beginTransaction()
+        try {
+            db.delete(ChatDatabaseHelper.TABLE_MESSAGES, selection, args)
+            db.delete(
+                ChatDatabaseHelper.TABLE_SUMMARIES,
+                "${ChatDatabaseHelper.COL_SUM_CONV_ID} = ?",
+                arrayOf(conversationId)
+            )
+            refreshConversationPreview(db, conversationId)
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+        cleanupOrphanedVlmImages(imagePaths, db)
+    }
+
+    suspend fun deleteMessagesFromId(conversationId: String, messageId: Long) = withContext(Dispatchers.IO) {
+        val db = dbHelper.writableDatabase
+        var targetTs: Long? = null
+        val imagePaths = mutableListOf<String>()
+        db.beginTransaction()
+        try {
+            db.query(
+                ChatDatabaseHelper.TABLE_MESSAGES,
+                arrayOf(ChatDatabaseHelper.COL_MSG_TIMESTAMP),
+                "${ChatDatabaseHelper.COL_MSG_CONV_ID} = ? AND ${ChatDatabaseHelper.COL_MSG_ID} = ?",
+                arrayOf(conversationId, messageId.toString()),
+                null,
+                null,
+                null
+            ).use { c ->
+                if (c.moveToFirst()) {
+                    targetTs = c.getLong(0)
+                }
+            }
+            val ts = targetTs
+            if (ts != null) {
+                val selection =
+                    "${ChatDatabaseHelper.COL_MSG_CONV_ID} = ? AND (" +
+                        "${ChatDatabaseHelper.COL_MSG_TIMESTAMP} > ? OR " +
+                        "(${ChatDatabaseHelper.COL_MSG_TIMESTAMP} = ? AND ${ChatDatabaseHelper.COL_MSG_ID} >= ?))"
+                val args = arrayOf(conversationId, ts.toString(), ts.toString(), messageId.toString())
+                imagePaths += collectImagePaths(
+                    db,
+                    "$selection AND ${ChatDatabaseHelper.COL_MSG_IMAGE_PATH} IS NOT NULL",
+                    args
+                )
+                db.delete(ChatDatabaseHelper.TABLE_MESSAGES, selection, args)
+                db.delete(
+                    ChatDatabaseHelper.TABLE_SUMMARIES,
+                    "${ChatDatabaseHelper.COL_SUM_CONV_ID} = ?",
+                    arrayOf(conversationId)
+                )
+                refreshConversationPreview(db, conversationId)
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+        cleanupOrphanedVlmImages(imagePaths, db)
+    }
+
+    suspend fun getUserMessageForAssistantTurn(
+        conversationId: String,
+        assistantMessageId: Long,
+    ): ChatMessage? = withContext(Dispatchers.IO) {
+        val db = dbHelper.readableDatabase
+        val targetTs: Long = db.query(
+            ChatDatabaseHelper.TABLE_MESSAGES,
+            arrayOf(ChatDatabaseHelper.COL_MSG_TIMESTAMP),
+            "${ChatDatabaseHelper.COL_MSG_CONV_ID} = ? AND ${ChatDatabaseHelper.COL_MSG_ID} = ?",
+            arrayOf(conversationId, assistantMessageId.toString()),
+            null,
+            null,
+            null
+        ).use { c ->
+            if (c.moveToFirst()) c.getLong(0) else null
+        } ?: return@withContext null
+
+        db.rawQuery(
+            """
+            SELECT * FROM ${ChatDatabaseHelper.TABLE_MESSAGES}
+            WHERE ${ChatDatabaseHelper.COL_MSG_CONV_ID} = ?
+              AND ${ChatDatabaseHelper.COL_MSG_IS_USER} = 1
+              AND (
+                ${ChatDatabaseHelper.COL_MSG_TIMESTAMP} < ? OR
+                (${ChatDatabaseHelper.COL_MSG_TIMESTAMP} = ? AND ${ChatDatabaseHelper.COL_MSG_ID} < ?)
+              )
+            ORDER BY ${ChatDatabaseHelper.COL_MSG_TIMESTAMP} DESC, ${ChatDatabaseHelper.COL_MSG_ID} DESC
+            LIMIT 1
+            """.trimIndent(),
+            arrayOf(conversationId, targetTs.toString(), targetTs.toString(), assistantMessageId.toString())
+        ).use { c ->
+            if (c.moveToFirst()) cursorToMessage(c) else null
+        }
+    }
+
+    private fun refreshConversationPreview(db: SQLiteDatabase, conversationId: String) {
+        var preview = ""
+        var updatedAt: Long? = null
+        db.rawQuery(
+            """
+            SELECT ${ChatDatabaseHelper.COL_MSG_TEXT}, ${ChatDatabaseHelper.COL_MSG_TIMESTAMP}
+            FROM ${ChatDatabaseHelper.TABLE_MESSAGES}
+            WHERE ${ChatDatabaseHelper.COL_MSG_CONV_ID} = ?
+            ORDER BY ${ChatDatabaseHelper.COL_MSG_TIMESTAMP} DESC, ${ChatDatabaseHelper.COL_MSG_ID} DESC
+            LIMIT 1
+            """.trimIndent(),
+            arrayOf(conversationId)
+        ).use { c ->
+            if (c.moveToFirst()) {
+                preview = (c.getString(0) ?: "").take(80)
+                updatedAt = c.getLong(1)
+            }
+        }
+        val convValues = ContentValues().apply {
+            put(ChatDatabaseHelper.COL_CONV_PREVIEW, preview)
+            updatedAt?.let { put(ChatDatabaseHelper.COL_CONV_UPDATED_AT, it) }
+        }
+        db.update(
+            ChatDatabaseHelper.TABLE_CONVERSATIONS,
+            convValues,
+            "${ChatDatabaseHelper.COL_CONV_ID} = ?",
+            arrayOf(conversationId)
+        )
+    }
+
+    private fun collectImagePaths(
+        db: SQLiteDatabase,
+        selection: String?,
+        selectionArgs: Array<String>?,
+    ): List<String> {
+        val paths = mutableListOf<String>()
+        db.query(
+            ChatDatabaseHelper.TABLE_MESSAGES,
+            arrayOf(ChatDatabaseHelper.COL_MSG_IMAGE_PATH),
+            selection,
+            selectionArgs,
+            null,
+            null,
+            null
+        ).use { c ->
+            while (c.moveToNext()) {
+                if (!c.isNull(0)) {
+                    c.getString(0)?.takeIf { it.isNotBlank() }?.let { paths.add(it) }
+                }
+            }
+        }
+        return paths
+    }
+
+    private fun cleanupOrphanedVlmImages(candidatePaths: List<String>, db: SQLiteDatabase) {
+        if (candidatePaths.isEmpty()) return
+        val cacheRootCanonical = try {
+            appContext.cacheDir.canonicalPath
+        } catch (_: Exception) {
+            return
+        }
+        for (rawPath in candidatePaths.distinct()) {
+            if (rawPath.isBlank()) continue
+            val file = File(rawPath)
+            if (!file.name.startsWith("vlm_input_")) continue
+            val fileCanonical = try {
+                file.canonicalPath
+            } catch (_: Exception) {
+                continue
+            }
+            if (!fileCanonical.startsWith(cacheRootCanonical + File.separator)) continue
+            val stillReferenced = db.rawQuery(
+                "SELECT 1 FROM ${ChatDatabaseHelper.TABLE_MESSAGES} WHERE ${ChatDatabaseHelper.COL_MSG_IMAGE_PATH} = ? LIMIT 1",
+                arrayOf(rawPath)
+            ).use { it.moveToFirst() }
+            if (!stillReferenced && file.exists()) {
+                file.delete()
+            }
+        }
     }
 
     // ── Persistent Cross-Chat Memory ──────────────────────────────────────────
 
     override suspend fun saveMemory(item: com.example.on_device_qwen.model.MemoryItem) = withContext(Dispatchers.IO) {
+        val cleanContent = item.sanitizedContent()
+        if (cleanContent.isBlank() || com.example.on_device_qwen.domain.memory.MemoryManager.containsSensitiveInfo(cleanContent)) {
+            return@withContext -1L
+        }
         val db = dbHelper.writableDatabase
         val values = ContentValues().apply {
             put(ChatDatabaseHelper.COL_MEM_ID, item.id)
             put(ChatDatabaseHelper.COL_MEM_CATEGORY, item.category.name)
-            put(ChatDatabaseHelper.COL_MEM_CONTENT, item.content)
+            put(ChatDatabaseHelper.COL_MEM_CONTENT, cleanContent)
             put(ChatDatabaseHelper.COL_MEM_SOURCE_CONV_ID, item.sourceConversationId)
             put(ChatDatabaseHelper.COL_MEM_CREATED_AT, item.createdAt)
             put(ChatDatabaseHelper.COL_MEM_UPDATED_AT, item.updatedAt)
@@ -280,14 +536,43 @@ class ConversationRepository(context: Context) : com.example.on_device_qwen.mode
             ChatDatabaseHelper.TABLE_MEMORIES,
             null,
             values,
-            android.database.sqlite.SQLiteDatabase.CONFLICT_REPLACE
+            SQLiteDatabase.CONFLICT_REPLACE
         )
     }
 
     override suspend fun updateMemory(id: String, newContent: String, category: com.example.on_device_qwen.model.MemoryCategory?) = withContext(Dispatchers.IO) {
+        val cleanContent = com.example.on_device_qwen.domain.memory.MemoryManager.sanitizeContent(newContent)
+        if (cleanContent.isBlank() || com.example.on_device_qwen.domain.memory.MemoryManager.containsSensitiveInfo(cleanContent)) {
+            return@withContext 0
+        }
         val db = dbHelper.writableDatabase
         val values = ContentValues().apply {
-            put(ChatDatabaseHelper.COL_MEM_CONTENT, newContent)
+            put(ChatDatabaseHelper.COL_MEM_CONTENT, cleanContent)
+            put(ChatDatabaseHelper.COL_MEM_UPDATED_AT, System.currentTimeMillis())
+            category?.let { put(ChatDatabaseHelper.COL_MEM_CATEGORY, it.name) }
+        }
+        db.update(
+            ChatDatabaseHelper.TABLE_MEMORIES,
+            values,
+            "${ChatDatabaseHelper.COL_MEM_ID} = ?",
+            arrayOf(id)
+        )
+    }
+
+    override suspend fun updateMemoryWithKeywords(
+        id: String,
+        newContent: String,
+        keywords: String,
+        category: com.example.on_device_qwen.model.MemoryCategory?,
+    ): Int = withContext(Dispatchers.IO) {
+        val cleanContent = com.example.on_device_qwen.domain.memory.MemoryManager.sanitizeContent(newContent)
+        if (cleanContent.isBlank() || com.example.on_device_qwen.domain.memory.MemoryManager.containsSensitiveInfo(cleanContent)) {
+            return@withContext 0
+        }
+        val db = dbHelper.writableDatabase
+        val values = ContentValues().apply {
+            put(ChatDatabaseHelper.COL_MEM_CONTENT, cleanContent)
+            put(ChatDatabaseHelper.COL_MEM_KEYWORDS, keywords)
             put(ChatDatabaseHelper.COL_MEM_UPDATED_AT, System.currentTimeMillis())
             category?.let { put(ChatDatabaseHelper.COL_MEM_CATEGORY, it.name) }
         }
@@ -531,15 +816,47 @@ class ConversationRepository(context: Context) : com.example.on_device_qwen.mode
     }
 
     private fun cursorToMessage(cursor: Cursor): ChatMessage {
-        val hasBenchmark = cursor.getLong(cursor.getColumnIndexOrThrow(ChatDatabaseHelper.COL_MSG_TTFT_MS)) > 0 ||
-                cursor.getDouble(cursor.getColumnIndexOrThrow(ChatDatabaseHelper.COL_MSG_DECODE_TPS)) > 0
+        val ttftMs = cursor.getLong(cursor.getColumnIndexOrThrow(ChatDatabaseHelper.COL_MSG_TTFT_MS))
+        val decodeTps = cursor.getDouble(cursor.getColumnIndexOrThrow(ChatDatabaseHelper.COL_MSG_DECODE_TPS))
+        val decodeTokens = cursor.getInt(cursor.getColumnIndexOrThrow(ChatDatabaseHelper.COL_MSG_DECODE_TOKENS))
+        val durationMs = cursor.getLong(cursor.getColumnIndexOrThrow(ChatDatabaseHelper.COL_MSG_DURATION_MS))
+        val backend = cursor.getString(cursor.getColumnIndexOrThrow(ChatDatabaseHelper.COL_MSG_BACKEND)) ?: "CPU"
+
+        val prefillTpsIdx = cursor.getColumnIndex(ChatDatabaseHelper.COL_MSG_PREFILL_TPS)
+        val prefillTps = if (prefillTpsIdx >= 0 && !cursor.isNull(prefillTpsIdx)) {
+            cursor.getDouble(prefillTpsIdx).takeIf { it > 0.0 }
+        } else null
+
+        val prefillTokensIdx = cursor.getColumnIndex(ChatDatabaseHelper.COL_MSG_PREFILL_TOKENS)
+        val prefillTokens = if (prefillTokensIdx >= 0 && !cursor.isNull(prefillTokensIdx)) {
+            cursor.getInt(prefillTokensIdx).takeIf { it > 0 }
+        } else null
+
+        val modelNameIdx = cursor.getColumnIndex(ChatDatabaseHelper.COL_MSG_MODEL_NAME)
+        val modelName = if (modelNameIdx >= 0 && !cursor.isNull(modelNameIdx)) cursor.getString(modelNameIdx) else null
+
+        val backendLabelIdx = cursor.getColumnIndex(ChatDatabaseHelper.COL_MSG_BACKEND_LABEL)
+        val backendLabel = if (backendLabelIdx >= 0 && !cursor.isNull(backendLabelIdx)) cursor.getString(backendLabelIdx) else null
+
+        val isCancelledIdx = cursor.getColumnIndex(ChatDatabaseHelper.COL_MSG_IS_CANCELLED)
+        val isCancelled = isCancelledIdx >= 0 && cursor.getInt(isCancelledIdx) == 1
+
+        val hasBenchmark = ttftMs > 0L ||
+            decodeTps > 0.0 ||
+            (prefillTps ?: 0.0) > 0.0 ||
+            decodeTokens > 0 ||
+            (prefillTokens ?: 0) > 0 ||
+            isCancelled
+
         val benchmark = if (hasBenchmark) {
             BenchmarkMetrics(
-                ttftMs = cursor.getLong(cursor.getColumnIndexOrThrow(ChatDatabaseHelper.COL_MSG_TTFT_MS)),
-                decodeTps = cursor.getDouble(cursor.getColumnIndexOrThrow(ChatDatabaseHelper.COL_MSG_DECODE_TPS)),
-                decodeTokens = cursor.getInt(cursor.getColumnIndexOrThrow(ChatDatabaseHelper.COL_MSG_DECODE_TOKENS)),
-                totalDurationMs = cursor.getLong(cursor.getColumnIndexOrThrow(ChatDatabaseHelper.COL_MSG_DURATION_MS)),
-                backend = cursor.getString(cursor.getColumnIndexOrThrow(ChatDatabaseHelper.COL_MSG_BACKEND)) ?: "CPU"
+                ttftMs = ttftMs,
+                decodeTps = decodeTps,
+                prefillTps = prefillTps,
+                prefillTokens = prefillTokens,
+                decodeTokens = decodeTokens,
+                totalDurationMs = durationMs,
+                backend = backend,
             )
         } else null
 
@@ -553,7 +870,10 @@ class ConversationRepository(context: Context) : com.example.on_device_qwen.mode
             imagePath = cursor.getString(cursor.getColumnIndexOrThrow(ChatDatabaseHelper.COL_MSG_IMAGE_PATH)),
             thinkText = cursor.getString(cursor.getColumnIndexOrThrow(ChatDatabaseHelper.COL_MSG_THINK_TEXT)),
             isError = cursor.getInt(cursor.getColumnIndexOrThrow(ChatDatabaseHelper.COL_MSG_IS_ERROR)) == 1,
-            benchmark = benchmark
+            benchmark = benchmark,
+            modelName = modelName,
+            backendLabel = backendLabel,
+            isCancelled = isCancelled,
         )
     }
 }

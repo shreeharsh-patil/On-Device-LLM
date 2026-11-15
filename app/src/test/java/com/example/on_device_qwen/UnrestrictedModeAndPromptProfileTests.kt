@@ -196,10 +196,14 @@ class UnrestrictedModeAndPromptProfileTests {
         val invalidConfig = GenerationConfig(
             temperature = 5f,
             topP = 1.5f,
+            topK = 250,
+            minP = -0.2f,
+            seed = -5,
             repetitionPenalty = 3f,
             maxOutputTokens = 99999,
             contextLength = 1,
-            threadCount = 999,
+            threadCount = 16,
+            streamBatchIntervalMs = 5L,
             systemPrompt = "x".repeat(9000),
             stopSequences = listOf("", "a".repeat(9000)),
             unrestrictedMode = UnrestrictedMode.STANDARD,
@@ -209,10 +213,14 @@ class UnrestrictedModeAndPromptProfileTests {
         val errors = PromptValidation.validate(invalidConfig)
         assertTrue("Invalid temperature must be rejected", errors.any { it.invalidKey == "temperature" })
         assertTrue("Invalid topP must be rejected", errors.any { it.invalidKey == "top_p" })
+        assertTrue("Invalid topK must be rejected", errors.any { it.invalidKey == "top_k" })
+        assertTrue("Invalid minP must be rejected", errors.any { it.invalidKey == "min_p" })
+        assertTrue("Invalid seed must be rejected", errors.any { it.invalidKey == "seed" })
         assertTrue("Invalid repetition penalty must be rejected", errors.any { it.invalidKey == "repetition_penalty" })
         assertTrue("Invalid max tokens must be rejected", errors.any { it.invalidKey == "max_output_tokens" })
         assertTrue("Invalid context length must be rejected", errors.any { it.invalidKey == "context_length" })
-        assertTrue("Invalid thread count must be rejected", errors.any { it.invalidKey == "thread_count" })
+        assertTrue("Thread count > 8 must be rejected", errors.any { it.invalidKey == "thread_count" })
+        assertTrue("Out-of-range batch interval must be rejected", errors.any { it.invalidKey == "stream_batch_interval_ms" })
         assertTrue("Oversized system prompt must be rejected", errors.any { it.invalidKey == "system_prompt" })
         assertTrue("Oversized stop sequence must be rejected", errors.any { it.invalidKey == "stop_sequences" })
         assertTrue("Blank stop sequence must be rejected", errors.any { it.invalidKey == "stop_sequences" })
@@ -239,20 +247,22 @@ class UnrestrictedModeAndPromptProfileTests {
 
     @Test
     fun testSupportedParametersMatrixIsHonest() {
-        val gguf = GenerationConfig.supportedParameters(EngineType.LLAMA_CPP)
-        val litert = GenerationConfig.supportedParameters(EngineType.LITERT)
-        for (key in listOf("temperature", "topP", "repetitionPenalty")) {
-            assertFalse(
-                "GGUF $key must be flagged unsupported at runtime",
+        val gguf = PromptValidation.effectiveRuntimeSupport(EngineType.LLAMA_CPP)
+        val litert = PromptValidation.effectiveRuntimeSupport(EngineType.LITERT)
+        for (key in listOf("temperature", "topP", "topK", "repetitionPenalty", "seed", "systemPrompt", "maxOutputTokens")) {
+            assertTrue(
+                "GGUF $key must be wired at runtime",
                 gguf.first { it.key == key }.supportedAtRuntime
             )
-            assertFalse(
-                "LiteRT $key must be flagged unsupported at runtime",
+            assertTrue(
+                "LiteRT $key must be wired at runtime",
                 litert.first { it.key == key }.supportedAtRuntime
             )
         }
-        assertTrue(gguf.first { it.key == "systemPrompt" }.supportedAtRuntime)
-        assertTrue(litert.first { it.key == "maxOutputTokens" }.supportedAtRuntime)
+        assertTrue(gguf.first { it.key == "minP" }.supportedAtRuntime)
+        assertTrue(gguf.first { it.key == "stopSequences" }.supportedAtRuntime)
+        assertFalse("LiteRT SamplerConfig does not expose minP", litert.first { it.key == "minP" }.supportedAtRuntime)
+        assertFalse("LiteRT handles EOG natively instead of custom stop strings", litert.first { it.key == "stopSequences" }.supportedAtRuntime)
     }
 
     @Test

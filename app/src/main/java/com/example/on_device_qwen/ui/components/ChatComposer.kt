@@ -1,14 +1,15 @@
 package com.example.on_device_qwen.ui.components
 
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.*
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -20,12 +21,13 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -37,11 +39,12 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
- * Authentic ChatGPT-inspired floating message composer.
- * Minimal pill container with attachment icon, auto-expanding text field, and dynamic Send (↑) / Stop (■) button.
+ * Compact native composer with persistent draft text and real image capability gating.
+ * The local model decides whether image attachment is available.
  */
 @Composable
 fun ChatComposer(
@@ -51,30 +54,37 @@ fun ChatComposer(
     onStopGeneration: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    var inputText by remember { mutableStateOf("") }
-    var selectedImageUri by remember { mutableStateOf<Uri?>(null) }
+    var inputText by rememberSaveable { mutableStateOf("") }
+    var selectedImageUri by rememberSaveable { mutableStateOf<Uri?>(null) }
     val keyboardController = LocalSoftwareKeyboardController.current
     val haptic = LocalHapticFeedback.current
     val context = LocalContext.current
 
-    val photoPickerLauncher = rememberLauncherForActivityResult(
+    val photoPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri: Uri? ->
-        if (uri != null) {
+        if (uri != null && isVisionModel) {
             selectedImageUri = uri
             haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
         }
     }
+    // Sampling an attachment off the main thread avoids decoding huge photos in Compose.
+    val thumbnail by produceState<Bitmap?>(null, selectedImageUri) {
+        val uri = selectedImageUri
+        value = if (uri == null) null else withContext(Dispatchers.IO) {
+            runCatching {
+                context.contentResolver.openInputStream(uri)?.use { stream ->
+                    BitmapFactory.decodeStream(stream, null, BitmapFactory.Options().apply { inSampleSize = 4 })
+                }
+            }.getOrNull()
+        }
+    }
 
-    val canSend = (inputText.isNotBlank() || selectedImageUri != null) && !isGenerating
-
-    val handleSend = {
+    val canSend = !isGenerating && (inputText.isNotBlank() || selectedImageUri != null)
+    val send = {
         if (canSend) {
             haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-            val textToSend = if (inputText.isBlank() && selectedImageUri != null) {
-                "Describe this image in detail."
-            } else inputText
-            onSendMessage(textToSend, selectedImageUri)
+            onSendMessage(inputText.ifBlank { "Describe this image." }, selectedImageUri)
             inputText = ""
             selectedImageUri = null
             keyboardController?.hide()
@@ -86,176 +96,128 @@ fun ChatComposer(
             .fillMaxWidth()
             .background(MaterialTheme.colorScheme.background)
             .imePadding()
-            .padding(horizontal = 14.dp, vertical = 8.dp)
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // Selected Image Preview Thumbnail Chip
-        AnimatedVisibility(visible = selectedImageUri != null) {
-            if (selectedImageUri != null) {
-                val previewBitmap = remember(selectedImageUri) {
-                    try {
-                        context.contentResolver.openInputStream(selectedImageUri!!)?.use {
-                            BitmapFactory.decodeStream(it)
-                        }
-                    } catch (_: Exception) {
-                        null
-                    }
-                }
-
+        Column(modifier = Modifier.widthIn(max = 820.dp)) {
+            AnimatedVisibility(visible = selectedImageUri != null) {
                 Surface(
+                    shape = RoundedCornerShape(16.dp),
                     color = MaterialTheme.colorScheme.surfaceVariant,
-                    shape = RoundedCornerShape(12.dp),
-                    modifier = Modifier
-                        .padding(bottom = 8.dp)
-                        .fillMaxWidth()
+                    modifier = Modifier.padding(bottom = 10.dp)
                 ) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.padding(6.dp)
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)
                     ) {
-                        if (previewBitmap != null) {
+                        if (thumbnail != null) {
                             Image(
-                                bitmap = previewBitmap.asImageBitmap(),
-                                contentDescription = "Attached photo preview",
+                                bitmap = thumbnail!!.asImageBitmap(),
+                                contentDescription = "Selected photo",
                                 contentScale = ContentScale.Crop,
-                                modifier = Modifier
-                                    .size(44.dp)
-                                    .clip(RoundedCornerShape(8.dp))
+                                modifier = Modifier.size(44.dp).clip(RoundedCornerShape(10.dp))
                             )
                             Spacer(Modifier.width(10.dp))
                         }
                         Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                "Image attached",
-                                style = MaterialTheme.typography.labelMedium,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                            Text(
-                                "Multimodal visual query ready",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
+                            Text("Photo attached", style = MaterialTheme.typography.labelLarge)
+                            Text("Included in your next message", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
-                        IconButton(
-                            onClick = { selectedImageUri = null },
-                            modifier = Modifier.size(32.dp)
-                        ) {
-                            Icon(
-                                Icons.Default.Close,
-                                contentDescription = "Remove photo",
-                                modifier = Modifier.size(16.dp),
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
+                        IconButton(onClick = { selectedImageUri = null }) {
+                            Icon(Icons.Default.Close, contentDescription = "Remove photo")
                         }
                     }
                 }
             }
-        }
 
-        // Floating pill input bar
-        Surface(
-            shape = RoundedCornerShape(26.dp),
-            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
-            border = androidx.compose.foundation.BorderStroke(
-                1.dp,
-                MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
-            ),
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 6.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.Bottom
+            Surface(
+                shape = RoundedCornerShape(26.dp),
+                color = MaterialTheme.colorScheme.surface,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                shadowElevation = 3.dp
             ) {
-                // Plus / Attachment icon
-                IconButton(
-                    onClick = {
-                        photoPickerLauncher.launch(
-                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                        )
-                    },
-                    modifier = Modifier.size(38.dp)
+                Row(
+                    verticalAlignment = Alignment.Bottom,
+                    modifier = Modifier.fillMaxWidth().padding(start = 5.dp, end = 7.dp, top = 7.dp, bottom = 7.dp)
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.Add,
-                        contentDescription = "Attach image",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
-
-                // Text field
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .padding(horizontal = 6.dp, vertical = 8.dp)
-                ) {
-                    if (inputText.isEmpty()) {
-                        Text(
-                            text = if (isGenerating) "Generating response…" else "Message",
-                            style = TextStyle(
-                                fontSize = 16.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
-                            )
+                    IconButton(
+                        onClick = {
+                            photoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                        },
+                        enabled = isVisionModel && !isGenerating,
+                        modifier = Modifier.size(44.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.Add,
+                            contentDescription = if (isVisionModel) "Attach photo" else "Photo attachments require a vision model",
+                            tint = if (isVisionModel) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
                         )
                     }
 
-                    BasicTextField(
-                        value = inputText,
-                        onValueChange = { inputText = it },
-                        textStyle = TextStyle(
-                            fontSize = 16.sp,
-                            color = MaterialTheme.colorScheme.onSurface,
-                            lineHeight = 22.sp
-                        ),
-                        cursorBrush = SolidColor(MaterialTheme.colorScheme.onSurface),
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                        keyboardActions = KeyboardActions(onSend = { handleSend() }),
-                        maxLines = 5,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
+                    Box(
+                        modifier = Modifier.weight(1f).padding(horizontal = 7.dp, vertical = 10.dp)
+                    ) {
+                        if (inputText.isEmpty()) {
+                            Text(
+                                if (isGenerating) "Generating your answer…" else "Ask anything…",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                style = MaterialTheme.typography.bodyLarge
+                            )
+                        }
+                        BasicTextField(
+                            value = inputText,
+                            onValueChange = { inputText = it },
+                            textStyle = TextStyle(
+                                color = MaterialTheme.colorScheme.onSurface,
+                                fontSize = MaterialTheme.typography.bodyLarge.fontSize,
+                                lineHeight = MaterialTheme.typography.bodyLarge.lineHeight
+                            ),
+                            cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                            keyboardActions = KeyboardActions(onSend = { send() }),
+                            maxLines = 6,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
 
-                // Send (↑) or Stop (■) button
-                if (isGenerating) {
                     FilledIconButton(
                         onClick = {
-                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                            onStopGeneration()
+                            if (isGenerating) {
+                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                onStopGeneration()
+                            } else send()
                         },
-                        colors = IconButtonDefaults.filledIconButtonColors(
-                            containerColor = MaterialTheme.colorScheme.onSurface,
-                            contentColor = MaterialTheme.colorScheme.surface
-                        ),
+                        enabled = isGenerating || canSend,
                         shape = CircleShape,
-                        modifier = Modifier.size(36.dp)
+                        colors = IconButtonDefaults.filledIconButtonColors(
+                            containerColor = MaterialTheme.colorScheme.primary,
+                            contentColor = MaterialTheme.colorScheme.onPrimary,
+                            disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+                            disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant
+                        ),
+                        modifier = Modifier.size(44.dp)
                     ) {
                         Icon(
-                            imageVector = Icons.Default.Stop,
-                            contentDescription = "Stop generating",
-                            modifier = Modifier.size(16.dp)
-                        )
-                    }
-                } else {
-                    FilledIconButton(
-                        onClick = { handleSend() },
-                        enabled = canSend,
-                        colors = IconButtonDefaults.filledIconButtonColors(
-                            containerColor = if (canSend) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f),
-                            contentColor = if (canSend) MaterialTheme.colorScheme.surface else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
-                            disabledContainerColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f),
-                            disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f)
-                        ),
-                        shape = CircleShape,
-                        modifier = Modifier.size(36.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.ArrowUpward,
-                            contentDescription = "Send",
-                            modifier = Modifier.size(18.dp)
+                            if (isGenerating) Icons.Default.Stop else Icons.Default.ArrowUpward,
+                            contentDescription = if (isGenerating) "Stop generation" else "Send message",
+                            modifier = Modifier.size(20.dp)
                         )
                     }
                 }
+            }
+            Spacer(Modifier.height(8.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(Icons.Outlined.Lock, contentDescription = null, modifier = Modifier.size(12.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.width(5.dp))
+                Text(
+                    "Your conversations stay on this device",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
     }

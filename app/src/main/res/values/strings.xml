@@ -11,10 +11,13 @@
     <string name="cd_dismiss_banner">Dismiss notice</string>
     <string name="cd_more_options">More options</string>
     <string name="cd_clear_search">Clear search</string>
+    <string name="cd_open_diagnostics">Open device diagnostics</string>
+    <string name="cd_switch_model">Switch active model</string>
 
     <!-- Chat Composer & Messages -->
     <string name="cd_attach_image">Attach image</string>
     <string name="cd_remove_image">Remove attached image</string>
+    <string name="cd_attached_image">Attached image</string>
     <string name="cd_send_message">Send message</string>
     <string name="cd_stop_generation">Stop generating</string>
     <string name="cd_scroll_to_bottom">Scroll to latest message</string>
@@ -24,12 +27,143 @@
     <string name="cd_regenerate">Regenerate response</string>
     <string name="cd_share_message">Share message</string>
     <string name="cd_edit_message">Edit message</string>
+    <string name="cd_retry_generation">Retry failed response</string>
 
-    <!-- Sections & Modes -->
+    <!-- Labels & Navigation -->
     <string name="label_standard_mode">Standard</string>
     <string name="label_unrestricted_mode">Unrestricted</string>
     <string name="label_models">Models</string>
     <string name="label_memory">Memory</string>
     <string name="label_settings">Settings</string>
+    <string name="label_diagnostics">Diagnostics</string>
     <string name="label_active">Active</string>
+    <string name="label_cancel">Cancel</string>
+    <string name="label_save">Save</string>
+    <string name="label_delete">Delete</string>
+    <string name="label_confirm">Confirm</string>
+    <string name="label_retry">Retry</string>
+    <string name="label_send">Send</string>
+    <string name="label_edit">Edit</string>
+    <string name="label_rename">Rename</string>
+    <string name="label_pin">Pin</string>
+    <string name="label_unpin">Unpin</string>
+    <string name="label_share_markdown">Share Markdown</string>
+
+    <!-- Composer -->
+    <string name="composer_placeholder_text">Ask anything offline…</string>
+    <string name="composer_placeholder_vision">Ask anything or attach an image…</string>
+    <string name="composer_default_image_prompt">Describe this image in detail.</string>
+    <string name="composer_generating_status">Generating on device…</string>
+
+    <!-- Chat Screen & Message List -->
+    <string name="msg_copied_toast">Copied to clipboard</string>
+    <string name="msg_share_chooser_title">Share response</string>
+    <string name="msg_share_chat_title">Share conversation</string>
+    <string name="msg_no_share_app">No app available to share this text</string>
+    <string name="msg_edit_dialog_title">Edit Message</string>
+    <string name="msg_stopped_partial">Stopped · partial response saved</string>
+    <string name="msg_error_title">Generation Issue</string>
+    <string name="msg_memories_used_singular">1 persistent memory used in this turn</string>
+    <string name="msg_memories_used_plural">%1$d persistent memories used in this turn</string>
+    <string name="msg_jump_to_latest">Jump to latest</string>
+    <string name="msg_generating_jump">Generating · Jump to latest</string>
+
+    <!-- Empty Chat State -->
+    <string name="empty_chat_headline">Private Intelligence, Locally Run.</string>
+    <string name="empty_chat_subtitle">Prompts, context, and persistent memory stay completely on your device.</string>
+    <string name="empty_chat_prompts_label">Starter prompts</string>
+
+    <!-- Onboarding & Engine Setup -->
+    <string name="onboarding_badge">Local &amp; Private AI</string>
+    <string name="onboarding_title">Run language models offline on this device.</string>
+    <string name="onboarding_subtitle">No cloud servers, no telemetry, and no account required. Import a local GGUF or LiteRT model or browse compatible downloads.</string>
+    <string name="onboarding_specs_title">Detected Hardware</string>
+    <string name="onboarding_specs_ram">Memory: %1$s free of %2$s total</string>
+    <string name="onboarding_specs_cpu">Processor: %1$d CPU cores · %2$s</string>
+    <string name="onboarding_specs_backends">Available Backends: %1$s</string>
+    <string name="onboarding_recommended_title">Compatible Starter Models</string>
+    <string name="onboarding_import_cta">Import Model (.gguf / .litertlm)</string>
+    <string name="onboarding_browse_hub_cta">Browse Model Hub</string>
+    <string name="onboarding_continue_cta">Continue</string>
+    <string name="onboarding_loading_title">Initializing Local Engine</string>
+    <string name="onboarding_no_model_title">No Model Loaded</string>
+    <string name="onboarding_no_model_body">Import a GGUF or LiteRT model file from your device storage using the system file picker, or inspect compatible catalog models.</string>
+
+    <!-- Navigation Drawer -->
+    <string name="drawer_new_chat">New Chat</string>
+    <string name="drawer_search_placeholder">Search conversations…</string>
+    <string name="drawer_section_pinned">Pinned</string>
+    <string name="drawer_section_today">Today</string>
+    <string name="drawer_section_yesterday">Yesterday</string>
+    <string name="drawer_section_previous_7_days">Previous 7 Days</string>
+    <string name="drawer_section_older">Older</string>
+    <string name="drawer_empty_title">No conversations yet</string>
+    <string name="drawer_empty_search">No chats match \"%1$s\"</string>
+    <string name="drawer_clear_search">Reset Search</string>
+    <string name="drawer_rename_title">Rename Conversation</string>
+    <string name="drawer_rename_label">Title</string>
+    <string name="drawer_delete_title">Delete Conversation?</string>
+    <string name="drawer_delete_body">This permanently removes \"%1$s\" and its message history from local storage.</string>
+    <string name="drawer_telemetry_ram">%1$s MB free</string>
+
+    <!-- Model Hub -->
+    <string name="model_hub_title">Model Hub</string>
+    <string name="model_hub_tab_installed">Installed</string>
+    <string name="model_hub_tab_discover">Discover</string>
+    <string name="model_hub_tab_import">Import</string>
+    <string name="model_hub_empty_installed_title">No local models found</string>
+    <string name="model_hub_empty_installed_body">Import a .gguf or .litertlm model using the system picker, or browse compatible open-weights models in Discover.</string>
+    <string name="model_hub_load_action">Load Model</string>
+    <string name="model_hub_details_action">Details</string>
+    <string name="model_hub_delete_title">Remove Local Model?</string>
+    <string name="model_hub_delete_body">Unregisters \"%1$s\" and deletes the model file if stored inside app storage. This cannot be undone.</string>
+    <string name="model_hub_import_title">Import via System File Picker</string>
+    <string name="model_hub_import_desc">Uses Android\'s Storage Access Framework so you never need All-Files-Access permissions. Supports .gguf, .litertlm, .task, and .tflite weights from Downloads, SD cards, or local providers.</string>
+    <string name="model_hub_import_button">Select Model File</string>
+    <string name="model_hub_no_browser_toast">No browser app available to open model link</string>
+    <string name="model_hub_download_action">Open Source Page</string>
+
+    <!-- Settings -->
+    <string name="settings_title">Settings</string>
+    <string name="settings_tab_general">General</string>
+    <string name="settings_tab_inference">Inference</string>
+    <string name="settings_tab_prompts">Prompts</string>
+    <string name="settings_tab_memory">Data</string>
+    <string name="settings_section_appearance">Appearance &amp; Feedback</string>
+    <string name="settings_haptics_title">Haptic Feedback</string>
+    <string name="settings_haptics_desc">Subtle tactile clicks on sends, buttons, and controls</string>
+    <string name="settings_section_runtime">Execution Backend &amp; Performance</string>
+    <string name="settings_section_generation">Sampling &amp; Context</string>
+    <string name="settings_advanced_toggle_show">Show Advanced Parameters</string>
+    <string name="settings_advanced_toggle_hide">Hide Advanced Parameters</string>
+    <string name="settings_runtime_audit_title">Runtime Support Audit</string>
+    <string name="settings_section_profiles">Behavior &amp; Prompt Profiles</string>
+    <string name="settings_new_profile">New Profile</string>
+    <string name="settings_edit_profile">Edit Profile</string>
+    <string name="settings_delete_profile_title">Delete Custom Profile?</string>
+    <string name="settings_delete_profile_body">Delete \"%1$s\"? Built-in profiles can be reset instead.</string>
+    <string name="settings_section_privacy">Privacy &amp; Memory</string>
+    <string name="settings_manage_memories">Manage Persistent Memories</string>
+    <string name="settings_open_diagnostics">Open Hardware &amp; Runtime Diagnostics</string>
+    <string name="settings_section_about">About On-Device LLM</string>
+
+    <!-- Memory Manager -->
+    <string name="memory_title">Persistent Memory</string>
+    <string name="memory_enable_title">Cross-Chat Memory</string>
+    <string name="memory_enable_desc">Automatically remember preferences and facts across conversations, stored only in local SQLite.</string>
+    <string name="memory_search_placeholder">Filter stored memories…</string>
+    <string name="memory_add_action">Add Memory</string>
+    <string name="memory_clear_all">Clear All</string>
+    <string name="memory_clear_title">Clear All Memories?</string>
+    <string name="memory_clear_body">Permanently erase all %1$d saved cross-chat memories from this device?</string>
+    <string name="memory_empty_title">No stored memories yet</string>
+    <string name="memory_empty_body">Preferences and context shared in chat appear here, or add a memory manually.</string>
+
+    <!-- Diagnostics Sheet -->
+    <string name="diagnostics_title">Hardware &amp; Runtime Diagnostics</string>
+    <string name="diagnostics_device_section">Device Profile</string>
+    <string name="diagnostics_thermal_section">Thermals &amp; Power</string>
+    <string name="diagnostics_engine_section">Active Inference Engine</string>
+    <string name="diagnostics_capabilities_section">Engine Capabilities</string>
+    <string name="diagnostics_params_section">Runtime Parameter Support</string>
 </resources>

@@ -1,98 +1,110 @@
 package com.example.on_device_qwen
 
-import org.junit.Assert.*
+import com.example.on_device_qwen.viewmodel.ScrollFollowController
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
+/**
+ * Verifies production [ScrollFollowController] behavior used by MessageList:
+ * - auto-follow during streaming when pinned at bottom
+ * - pausing auto-follow when user drags upward while reading earlier messages
+ * - preserving position during incoming token chunks while paused
+ * - re-engaging follow when reaching bottom or tapping "Jump to latest"
+ * - conversation switch resets pause state
+ * - exact LazyColumn index mapping when memory/header banners precede messages
+ */
 class ScrollAndFollowModeTests {
 
-    /**
-     * Simulates the exact state machine implemented in ChatScreen.kt
-     * for smooth scrolling and follow mode.
-     */
-    class ScrollFollowController {
-        var userScrolledAway: Boolean = false
-        var autoScrollTriggerCount: Int = 0
-
-        fun onScrollStateChanged(isScrollInProgress: Boolean, canScrollForward: Boolean) {
-            // When user actively drags or scrolls upward away from the bottom
-            if (isScrollInProgress && canScrollForward) {
-                userScrolledAway = true
-            } else if (!canScrollForward) {
-                // Reached the very bottom
-                userScrolledAway = false
-            }
-        }
-
-        fun onTokenStreamChunkArrived() {
-            // Auto-scroll ONLY when user has not intentionally scrolled away to read earlier messages
-            if (!userScrolledAway) {
-                autoScrollTriggerCount++
-            }
-        }
-
-        fun onJumpToBottomClicked() {
-            userScrolledAway = false
-            autoScrollTriggerCount++
-        }
-    }
-
     @Test
-    fun testInitialStateFollowsStreamingTokens() {
+    fun initialFollowModeTriggersScrollOnStreamingChunks() {
         val controller = ScrollFollowController()
-        assertFalse("Initial state should not consider user scrolled away", controller.userScrolledAway)
-
-        // 10 token chunks arrive
-        repeat(10) {
-            controller.onTokenStreamChunkArrived()
-        }
-
-        assertEquals("All 10 chunks should trigger auto-scroll when user is following stream", 10, controller.autoScrollTriggerCount)
-    }
-
-    @Test
-    fun testUserScrollingAwaySuspendsAutoScroll() {
-        val controller = ScrollFollowController()
-
-        // Stream starts
-        controller.onTokenStreamChunkArrived()
-        assertEquals(1, controller.autoScrollTriggerCount)
-
-        // User drags list up to read previous turn (isScrollInProgress = true, canScrollForward = true)
-        controller.onScrollStateChanged(isScrollInProgress = true, canScrollForward = true)
-        assertTrue("User scrolled away must be true after scrolling up", controller.userScrolledAway)
-
-        // 15 new token chunks arrive while user is reading earlier context
-        repeat(15) {
-            controller.onTokenStreamChunkArrived()
-        }
-
-        // Auto-scroll should NOT have fired during user inspection
-        assertEquals("Auto-scroll must be suspended while reading earlier messages", 1, controller.autoScrollTriggerCount)
-
-        // User clicks 'Jump to latest' button
-        controller.onJumpToBottomClicked()
-        assertFalse("Jump to bottom must re-engage follow mode", controller.userScrolledAway)
-        assertEquals("Jump to bottom triggers immediate scroll", 2, controller.autoScrollTriggerCount)
-
-        // Subsequent tokens continue auto-scrolling
-        controller.onTokenStreamChunkArrived()
+        assertFalse(controller.userScrolledAway)
+        assertTrue(controller.onNewMessageAdded())
+        assertTrue(controller.onTokenStreamChunkArrived())
+        assertTrue(controller.onTokenStreamChunkArrived())
         assertEquals(3, controller.autoScrollTriggerCount)
     }
 
     @Test
-    fun testReachingBottomNaturallyReEngagesFollowMode() {
+    fun draggingUpwardPausesAutoScrollAndPreservesReadingPosition() {
         val controller = ScrollFollowController()
+        controller.onNewMessageAdded()
+        val countBeforeDrag = controller.autoScrollTriggerCount
 
-        // Scrolled away
-        controller.onScrollStateChanged(isScrollInProgress = true, canScrollForward = true)
+        // User drags away from bottom (canScrollForward = true)
+        controller.onScrollStateChanged(isUserDragging = true, canScrollForward = true)
         assertTrue(controller.userScrolledAway)
 
-        // User scrolls back down to bottom (canScrollForward = false)
-        controller.onScrollStateChanged(isScrollInProgress = false, canScrollForward = false)
-        assertFalse("Reaching bottom should clear userScrolledAway", controller.userScrolledAway)
+        // User stops dragging while still scrolled upward
+        controller.onScrollStateChanged(isUserDragging = false, canScrollForward = true)
+        assertTrue("Still scrolled upward -> follow must remain paused", controller.userScrolledAway)
 
-        // New tokens stream
-        controller.onTokenStreamChunkArrived()
-        assertEquals(1, controller.autoScrollTriggerCount)
+        // Incoming streaming tokens should NOT yank the viewport down
+        assertFalse(controller.onTokenStreamChunkArrived())
+        assertFalse(controller.onTokenStreamChunkArrived())
+        assertEquals(countBeforeDrag, controller.autoScrollTriggerCount)
+    }
+
+    @Test
+    fun reachingBottomManuallyReEngagesFollowMode() {
+        val controller = ScrollFollowController()
+        controller.onScrollStateChanged(isUserDragging = true, canScrollForward = true)
+        assertTrue(controller.userScrolledAway)
+
+        // Scroll reaches bottom (canScrollForward = false)
+        controller.onScrollStateChanged(isUserDragging = false, canScrollForward = false)
+        assertFalse(controller.userScrolledAway)
+        assertTrue(controller.onTokenStreamChunkArrived())
+    }
+
+    @Test
+    fun jumpToBottomButtonClearsPauseAndIncrementsTrigger() {
+        val controller = ScrollFollowController()
+        controller.onScrollStateChanged(isUserDragging = true, canScrollForward = true)
+        assertTrue(controller.userScrolledAway)
+        val beforeJump = controller.autoScrollTriggerCount
+
+        controller.onJumpToBottomClicked()
+        assertFalse(controller.userScrolledAway)
+        assertEquals(beforeJump + 1, controller.autoScrollTriggerCount)
+        assertTrue(controller.onTokenStreamChunkArrived())
+    }
+
+    @Test
+    fun newUserMessageOverridesPauseAndFollowsNewTurn() {
+        val controller = ScrollFollowController()
+        controller.onScrollStateChanged(isUserDragging = true, canScrollForward = true)
+        assertTrue(controller.userScrolledAway)
+
+        assertTrue(controller.onNewMessageAdded())
+        assertFalse(controller.userScrolledAway)
+    }
+
+    @Test
+    fun conversationSwitchResetsUserScrolledAway() {
+        val controller = ScrollFollowController()
+        controller.onScrollStateChanged(isUserDragging = true, canScrollForward = true)
+        assertTrue(controller.userScrolledAway)
+
+        controller.resetForConversationSwitch()
+        assertFalse(controller.userScrolledAway)
+        assertTrue(controller.onTokenStreamChunkArrived())
+    }
+
+    @Test
+    fun bottomAnchorAndMessageIndexAccountForLeadingMemoryHeader() {
+        // Without header (0 leading items)
+        assertEquals(0, ScrollFollowController.messageListIndex(messageIndex = 0, leadingHeaderCount = 0))
+        assertEquals(4, ScrollFollowController.bottomAnchorIndex(messageCount = 4, leadingHeaderCount = 0))
+
+        // With 1 leading memory indicator banner item
+        assertEquals(1, ScrollFollowController.messageListIndex(messageIndex = 0, leadingHeaderCount = 1))
+        assertEquals(5, ScrollFollowController.bottomAnchorIndex(messageCount = 4, leadingHeaderCount = 1))
+
+        // Negative safety bounds clamp to 0
+        assertEquals(0, ScrollFollowController.messageListIndex(messageIndex = -2, leadingHeaderCount = -1))
+        assertEquals(0, ScrollFollowController.bottomAnchorIndex(messageCount = -1, leadingHeaderCount = -1))
     }
 }

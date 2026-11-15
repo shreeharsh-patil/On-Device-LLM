@@ -1,507 +1,597 @@
 package com.example.on_device_qwen.ui.components
 
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.*
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.DeleteOutline
+import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.MonitorHeart
+import androidx.compose.material.icons.rounded.Psychology
+import androidx.compose.material.icons.rounded.RestartAlt
+import androidx.compose.material.icons.rounded.Shield
+import androidx.compose.material.icons.rounded.Speed
+import androidx.compose.material.icons.rounded.Vibration
+import androidx.compose.material3.Icon
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
+import com.example.on_device_qwen.R
 import com.example.on_device_qwen.data.preferences.PerformanceMode
 import com.example.on_device_qwen.data.preferences.ThemeMode
-import com.example.on_device_qwen.domain.performance.DeviceThermalState
 import com.example.on_device_qwen.model.BackendType
+import com.example.on_device_qwen.model.GenerationConfig
 import com.example.on_device_qwen.model.PromptProfile
 import com.example.on_device_qwen.model.UnrestrictedMode
-import com.example.on_device_qwen.ui.theme.QwenPrimary
+import com.example.on_device_qwen.ui.designsystem.SovereignAlertDialog
+import com.example.on_device_qwen.ui.designsystem.SovereignBadge
+import com.example.on_device_qwen.ui.designsystem.SovereignBanner
+import com.example.on_device_qwen.ui.designsystem.SovereignDivider
+import com.example.on_device_qwen.ui.designsystem.SovereignHairlineCard
+import com.example.on_device_qwen.ui.designsystem.SovereignIconButton
+import com.example.on_device_qwen.ui.designsystem.SovereignModalSheet
+import com.example.on_device_qwen.ui.designsystem.SovereignPrimaryButton
+import com.example.on_device_qwen.ui.designsystem.SovereignSecondaryButton
+import com.example.on_device_qwen.ui.designsystem.SovereignSectionHeader
+import com.example.on_device_qwen.ui.designsystem.SovereignSegmentedControl
+import com.example.on_device_qwen.ui.designsystem.SovereignSettingsRow
+import com.example.on_device_qwen.ui.designsystem.SovereignSliderRow
+import com.example.on_device_qwen.ui.designsystem.SovereignStatusTone
+import com.example.on_device_qwen.ui.designsystem.SovereignSwitchRow
+import com.example.on_device_qwen.ui.designsystem.SovereignTextField
+import com.example.on_device_qwen.ui.designsystem.SovereignTheme
+import com.example.on_device_qwen.viewmodel.SettingsUiState
+import java.util.Locale
+import kotlin.math.roundToInt
 
-@OptIn(ExperimentalMaterial3Api::class)
+private enum class SettingsTab {
+    GENERAL, INFERENCE, PROMPTS, DATA
+}
+
 @Composable
 fun SettingsDialog(
-    performanceMode: PerformanceMode,
+    state: SettingsUiState,
+    onThemeModeChange: (ThemeMode) -> Unit,
+    onHapticsEnabledChange: (Boolean) -> Unit,
     onPerformanceModeChange: (PerformanceMode) -> Unit,
-    backendType: BackendType,
     onBackendTypeChange: (BackendType) -> Unit,
-    threadCount: Int,
     onThreadCountChange: (Int) -> Unit,
-    temperature: Float,
     onTemperatureChange: (Float) -> Unit,
-    topP: Float,
     onTopPChange: (Float) -> Unit,
-    maxTokens: Int,
+    onRepetitionPenaltyChange: (Float) -> Unit,
     onMaxTokensChange: (Int) -> Unit,
-    systemPrompt: String,
+    onContextLengthChange: (Int) -> Unit,
     onSystemPromptChange: (String) -> Unit,
-    chatMode: UnrestrictedMode,
     onChatModeChange: (UnrestrictedMode) -> Unit,
-    activeProfile: PromptProfile,
     onActiveProfileChange: (PromptProfile) -> Unit,
-    profiles: List<PromptProfile>,
-    onProfileSaved: (PromptProfile) -> Unit,
+    onProfileSaved: (PromptProfile) -> String?,
     onProfileDeleted: (String) -> Unit,
     onProfileReset: (String) -> Unit,
-    themeMode: ThemeMode,
-    onThemeModeChange: (ThemeMode) -> Unit,
-    thermalState: DeviceThermalState,
-    batteryTemp: Float,
-    batteryPercent: Int,
-    isCharging: Boolean,
-    availRamMb: Long,
-    totalRamMb: Long,
-    isMemoryEnabled: Boolean = true,
-    onToggleMemory: (Boolean) -> Unit = {},
-    onManageMemories: () -> Unit = {},
-    onDismiss: () -> Unit
+    onToggleMemory: (Boolean) -> Unit,
+    onManageMemories: () -> Unit,
+    onOpenDiagnostics: () -> Unit,
+    onDismiss: () -> Unit,
 ) {
-    Dialog(
-        onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false)
-    ) {
-        Surface(
-            modifier = Modifier
-                .fillMaxWidth(0.94f)
-                .fillMaxHeight(0.90f),
-            shape = RoundedCornerShape(20.dp),
-            color = MaterialTheme.colorScheme.surface,
-            tonalElevation = 6.dp
-        ) {
-            Column(modifier = Modifier.fillMaxSize()) {
-                // Top Header
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 20.dp, vertical = 16.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text(
-                        text = "Settings",
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.Bold
+    val colors = SovereignTheme.colors
+    val typography = SovereignTheme.typography
+    val spacing = SovereignTheme.spacing
+    val haptic = LocalHapticFeedback.current
+    val onSliderFinished: (() -> Unit)? = remember(state.hapticsEnabled, haptic) {
+        if (state.hapticsEnabled) {
+            { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove) }
+        } else {
+            null
+        }
+    }
+
+    var selectedTab by remember { mutableStateOf(SettingsTab.GENERAL) }
+    var showAdvancedInference by remember { mutableStateOf(false) }
+
+    var editingProfile by remember { mutableStateOf<PromptProfile?>(null) }
+    var isCreatingProfile by remember { mutableStateOf(false) }
+    var profileNameDraft by remember { mutableStateOf("") }
+    var profileTextDraft by remember { mutableStateOf("") }
+    var profileSaveError by remember { mutableStateOf<String?>(null) }
+    var profileToDelete by remember { mutableStateOf<PromptProfile?>(null) }
+
+    if (isCreatingProfile || editingProfile != null) {
+        val current = editingProfile
+        SovereignAlertDialog(
+            title = stringResource(if (current == null) R.string.settings_new_profile else R.string.settings_edit_profile),
+            confirmText = stringResource(R.string.label_save),
+            confirmEnabled = profileNameDraft.isNotBlank() && profileTextDraft.isNotBlank(),
+            onConfirm = {
+                val candidate = (current ?: PromptProfile(name = "", instructionText = "")).copy(
+                    name = profileNameDraft.trim(),
+                    instructionText = profileTextDraft.trim(),
+                    effectiveSystemPrompt = profileTextDraft.trim(),
+                )
+                val err = onProfileSaved(candidate)
+                if (err == null) {
+                    editingProfile = null
+                    isCreatingProfile = false
+                    profileSaveError = null
+                } else {
+                    profileSaveError = err
+                }
+            },
+            onDismissRequest = {
+                editingProfile = null
+                isCreatingProfile = false
+                profileSaveError = null
+            },
+            content = {
+                Column(verticalArrangement = Arrangement.spacedBy(spacing.sm)) {
+                    SovereignTextField(
+                        value = profileNameDraft,
+                        onValueChange = { profileNameDraft = it },
+                        label = "Profile Name",
+                        singleLine = true,
                     )
-                    IconButton(onClick = onDismiss) {
-                        Icon(Icons.Default.Close, contentDescription = "Close")
+                    SovereignTextField(
+                        value = profileTextDraft,
+                        onValueChange = { profileTextDraft = it },
+                        label = "System Instruction",
+                        minLines = 3,
+                        maxLines = 6,
+                        errorText = profileSaveError,
+                    )
+                }
+            },
+        )
+    }
+
+    profileToDelete?.let { target ->
+        SovereignAlertDialog(
+            title = stringResource(R.string.settings_delete_profile_title),
+            text = stringResource(R.string.settings_delete_profile_body, target.name),
+            confirmText = stringResource(R.string.label_delete),
+            isDestructive = true,
+            onConfirm = {
+                onProfileDeleted(target.id)
+                profileToDelete = null
+            },
+            onDismissRequest = { profileToDelete = null },
+        )
+    }
+
+    val tabGeneral = stringResource(R.string.settings_tab_general)
+    val tabInference = stringResource(R.string.settings_tab_inference)
+    val tabPrompts = stringResource(R.string.settings_tab_prompts)
+    val tabData = stringResource(R.string.settings_tab_memory)
+
+    SovereignModalSheet(
+        title = stringResource(R.string.settings_title),
+        subtitle = "${state.activeEngineType.displayName} · ${state.activeProfile.name}",
+        onDismissRequest = onDismiss,
+        stickyHeaderExtra = {
+            SovereignSegmentedControl(
+                options = SettingsTab.entries,
+                selected = selectedTab,
+                onSelect = { selectedTab = it },
+                label = { tab ->
+                    when (tab) {
+                        SettingsTab.GENERAL -> tabGeneral
+                        SettingsTab.INFERENCE -> tabInference
+                        SettingsTab.PROMPTS -> tabPrompts
+                        SettingsTab.DATA -> tabData
+                    }
+                },
+                hapticFeedback = state.hapticsEnabled,
+            )
+        },
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = spacing.lg, vertical = spacing.md),
+            verticalArrangement = Arrangement.spacedBy(spacing.lg),
+        ) {
+            when (selectedTab) {
+                SettingsTab.GENERAL -> {
+                    Column(verticalArrangement = Arrangement.spacedBy(spacing.sm)) {
+                        SovereignSectionHeader(title = stringResource(R.string.settings_section_appearance))
+                        SovereignSegmentedControl(
+                            options = ThemeMode.entries,
+                            selected = state.themeMode,
+                            onSelect = onThemeModeChange,
+                            label = { mode ->
+                                when (mode) {
+                                    ThemeMode.SYSTEM -> "System"
+                                    ThemeMode.LIGHT -> "Light"
+                                    ThemeMode.DARK -> "Dark"
+                                }
+                            },
+                            hapticFeedback = state.hapticsEnabled,
+                        )
+                        SovereignSwitchRow(
+                            title = stringResource(R.string.settings_haptics_title),
+                            subtitle = stringResource(R.string.settings_haptics_desc),
+                            checked = state.hapticsEnabled,
+                            onCheckedChange = onHapticsEnabledChange,
+                            leadingIcon = Icons.Rounded.Vibration,
+                            hapticFeedback = state.hapticsEnabled,
+                        )
+                    }
+
+                    Column(verticalArrangement = Arrangement.spacedBy(spacing.sm)) {
+                        SovereignSectionHeader(title = stringResource(R.string.settings_section_runtime))
+                        SovereignSegmentedControl(
+                            options = BackendType.entries,
+                            selected = state.backendType,
+                            onSelect = onBackendTypeChange,
+                            label = { it.chipText },
+                            hapticFeedback = state.hapticsEnabled,
+                        )
+                        state.executionBackendInfo?.let { info ->
+                            if (info.isFallback) {
+                                SovereignBanner(
+                                    message = "Fallback active: running on ${info.active.chipText} instead of ${info.requested.chipText}" +
+                                        (info.fallbackReason?.let { " — $it" } ?: ""),
+                                    tone = SovereignStatusTone.WARNING,
+                                )
+                            }
+                        }
+
+                        SovereignSegmentedControl(
+                            options = PerformanceMode.entries,
+                            selected = state.performanceMode,
+                            onSelect = onPerformanceModeChange,
+                            label = { mode ->
+                                when (mode) {
+                                    PerformanceMode.ECO -> "Eco"
+                                    PerformanceMode.BALANCED -> "Balanced"
+                                    PerformanceMode.PERFORMANCE -> "Performance"
+                                }
+                            },
+                            hapticFeedback = state.hapticsEnabled,
+                        )
+                        Text(
+                            text = state.performanceMode.description,
+                            style = typography.bodyCompact,
+                            color = colors.textSecondary,
+                        )
+
+                        SovereignHairlineCard(modifier = Modifier.fillMaxWidth()) {
+                            SovereignSliderRow(
+                                title = "CPU Threads",
+                                value = state.threadCount.toFloat(),
+                                onValueChange = { onThreadCountChange(it.roundToInt()) },
+                                valueRange = GenerationConfig.MIN_THREAD_COUNT.toFloat()..GenerationConfig.MAX_THREAD_COUNT.toFloat(),
+                                steps = (GenerationConfig.MAX_THREAD_COUNT - GenerationConfig.MIN_THREAD_COUNT - 1).coerceAtLeast(0),
+                                formattedValue = "${state.threadCount} threads",
+                                minLabel = "${GenerationConfig.MIN_THREAD_COUNT}",
+                                maxLabel = "${GenerationConfig.MAX_THREAD_COUNT}",
+                                onValueChangeFinished = onSliderFinished,
+                            )
+                        }
                     }
                 }
 
-                HorizontalDivider()
-
-                // Content
-                Column(
-                    modifier = Modifier
-                        .weight(1f)
-                        .verticalScroll(rememberScrollState())
-                        .padding(20.dp),
-                    verticalArrangement = Arrangement.spacedBy(20.dp)
-                ) {
-                    // 1. Performance Profile
-                    SettingsSection(title = "Performance Profile") {
-                        PerformanceMode.entries.forEach { mode ->
-                            val isSelected = mode == performanceMode
-                            Surface(
-                                shape = RoundedCornerShape(10.dp),
-                                color = if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .clickable { onPerformanceModeChange(mode) }
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(12.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    RadioButton(
-                                        selected = isSelected,
-                                        onClick = { onPerformanceModeChange(mode) }
-                                    )
-                                    Spacer(Modifier.width(8.dp))
-                                    Column {
-                                        Text(mode.displayName, fontWeight = FontWeight.SemiBold)
-                                        Text(
-                                            mode.description,
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                    }
-                                }
-                            }
-                            Spacer(Modifier.height(6.dp))
-                        }
+                SettingsTab.INFERENCE -> {
+                    if (state.validationErrors.isNotEmpty()) {
+                        SovereignBanner(
+                            message = state.validationErrors.first(),
+                            tone = SovereignStatusTone.ERROR,
+                        )
                     }
 
-                    // 2. Hardware Acceleration
-                    SettingsSection(title = "Hardware Backend") {
-                        Row(
+                    Column(verticalArrangement = Arrangement.spacedBy(spacing.sm)) {
+                        SovereignSectionHeader(title = stringResource(R.string.settings_section_generation))
+
+                        SovereignHairlineCard(modifier = Modifier.fillMaxWidth()) {
+                            SovereignSliderRow(
+                                title = "Temperature",
+                                subtitle = "Lower = focused & deterministic, higher = varied",
+                                value = state.temperature,
+                                onValueChange = onTemperatureChange,
+                                valueRange = GenerationConfig.MIN_TEMPERATURE..GenerationConfig.MAX_TEMPERATURE,
+                                formattedValue = String.format(Locale.US, "%.2f", state.temperature),
+                                minLabel = "0.0",
+                                maxLabel = "2.0",
+                                onValueChangeFinished = onSliderFinished,
+                            )
+                            SovereignDivider(modifier = Modifier.padding(vertical = spacing.xs))
+                            SovereignSliderRow(
+                                title = "Max Output Tokens",
+                                value = state.maxTokens.toFloat(),
+                                onValueChange = { onMaxTokensChange(((it / 64f).roundToInt() * 64).coerceAtLeast(64)) },
+                                valueRange = 64f..GenerationConfig.MAX_MAX_TOKENS.toFloat(),
+                                formattedValue = "${state.maxTokens} tok",
+                                minLabel = "64",
+                                maxLabel = "${GenerationConfig.MAX_MAX_TOKENS}",
+                                onValueChangeFinished = onSliderFinished,
+                            )
+                        }
+
+                        SovereignSecondaryButton(
+                            text = stringResource(
+                                if (showAdvancedInference) R.string.settings_advanced_toggle_hide
+                                else R.string.settings_advanced_toggle_show,
+                            ),
+                            onClick = { showAdvancedInference = !showAdvancedInference },
+                            leadingIcon = Icons.Rounded.Speed,
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            BackendType.entries.forEach { b ->
-                                FilterChip(
-                                    selected = b == backendType,
-                                    onClick = { onBackendTypeChange(b) },
-                                    label = { Text(b.chipText, fontWeight = FontWeight.Bold) },
-                                    modifier = Modifier.weight(1f)
+                        )
+
+                        AnimatedVisibility(visible = showAdvancedInference) {
+                            SovereignHairlineCard(modifier = Modifier.fillMaxWidth()) {
+                                SovereignSliderRow(
+                                    title = "Top-P (Nucleus Sampling)",
+                                    value = state.topP,
+                                    onValueChange = onTopPChange,
+                                    valueRange = GenerationConfig.MIN_TOP_P..GenerationConfig.MAX_TOP_P,
+                                    formattedValue = String.format(Locale.US, "%.2f", state.topP),
+                                    minLabel = "0.0",
+                                    maxLabel = "1.0",
+                                    onValueChangeFinished = onSliderFinished,
+                                )
+                                SovereignDivider(modifier = Modifier.padding(vertical = spacing.xs))
+                                SovereignSliderRow(
+                                    title = "Repetition Penalty",
+                                    value = state.repetitionPenalty,
+                                    onValueChange = onRepetitionPenaltyChange,
+                                    valueRange = GenerationConfig.MIN_REPETITION_PENALTY..GenerationConfig.MAX_REPETITION_PENALTY,
+                                    formattedValue = String.format(Locale.US, "%.2f", state.repetitionPenalty),
+                                    minLabel = "0.1",
+                                    maxLabel = "2.0",
+                                    onValueChangeFinished = onSliderFinished,
+                                )
+                                SovereignDivider(modifier = Modifier.padding(vertical = spacing.xs))
+                                SovereignSliderRow(
+                                    title = "Context Length",
+                                    subtitle = "Token window reserved for history + output",
+                                    value = state.contextLength.toFloat(),
+                                    onValueChange = {
+                                        val snapped = ((it / 512f).roundToInt() * 512).coerceIn(
+                                            GenerationConfig.MIN_CONTEXT_LENGTH,
+                                            GenerationConfig.MAX_CONTEXT_LENGTH,
+                                        )
+                                        onContextLengthChange(snapped)
+                                    },
+                                    valueRange = GenerationConfig.MIN_CONTEXT_LENGTH.toFloat()..GenerationConfig.MAX_CONTEXT_LENGTH.toFloat(),
+                                    formattedValue = "${state.contextLength} tok",
+                                    minLabel = "${GenerationConfig.MIN_CONTEXT_LENGTH}",
+                                    maxLabel = "${GenerationConfig.MAX_CONTEXT_LENGTH}",
+                                    onValueChangeFinished = onSliderFinished,
                                 )
                             }
                         }
                     }
 
-                    // 3. CPU Thread Count
-                    SettingsSection(title = "Inference Threads: $threadCount") {
-                        val maxCores = Runtime.getRuntime().availableProcessors().coerceAtLeast(4)
-                        Slider(
-                            value = threadCount.toFloat(),
-                            onValueChange = { onThreadCountChange(it.toInt()) },
-                            valueRange = 2f..maxCores.toFloat(),
-                            steps = maxCores - 3
+                    // Honest runtime parameter audit
+                    if (state.supportedParameters.isNotEmpty()) {
+                        Column(verticalArrangement = Arrangement.spacedBy(spacing.sm)) {
+                            SovereignSectionHeader(title = stringResource(R.string.settings_runtime_audit_title))
+                            SovereignHairlineCard(modifier = Modifier.fillMaxWidth()) {
+                                Column(verticalArrangement = Arrangement.spacedBy(spacing.sm)) {
+                                    state.supportedParameters.forEach { param ->
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically,
+                                        ) {
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(
+                                                    text = param.displayName,
+                                                    style = typography.pillTitle,
+                                                    color = colors.textPrimary,
+                                                )
+                                                Text(
+                                                    text = param.notes,
+                                                    style = typography.bodyCompact,
+                                                    color = colors.textSecondary,
+                                                )
+                                            }
+                                            Spacer(Modifier.size(spacing.sm))
+                                            SovereignBadge(
+                                                text = if (param.supportedAtRuntime) "Active" else "App Only",
+                                                tone = if (param.supportedAtRuntime) {
+                                                    SovereignStatusTone.SUCCESS
+                                                } else {
+                                                    SovereignStatusTone.NEUTRAL
+                                                },
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                SettingsTab.PROMPTS -> {
+                    Column(verticalArrangement = Arrangement.spacedBy(spacing.sm)) {
+                        SovereignSectionHeader(title = stringResource(R.string.settings_section_profiles))
+                        SovereignSegmentedControl(
+                            options = UnrestrictedMode.entries,
+                            selected = state.chatMode,
+                            onSelect = onChatModeChange,
+                            label = { it.displayName },
+                            hapticFeedback = state.hapticsEnabled,
                         )
                         Text(
-                            text = "Higher thread count increases TPS but consumes more battery and generates heat.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            text = if (state.chatMode == UnrestrictedMode.UNRESTRICTED) {
+                                "Unrestricted applies a minimal, non-preachy system instruction at the app layer. Model-weight behaviors remain governed by the loaded weights."
+                            } else {
+                                "Standard applies helpful assistant framing and balanced response defaults."
+                            },
+                            style = typography.bodyCompact,
+                            color = colors.textSecondary,
                         )
                     }
 
-                    // 4. Generation Hyperparameters
-                    SettingsSection(title = "Generation Parameters") {
-                        Text(
-                            text = "Temperature: ${String.format(java.util.Locale.US, "%.2f", temperature)}",
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.Medium
-                        )
-                        Slider(
-                            value = temperature,
-                            onValueChange = onTemperatureChange,
-                            valueRange = 0.1f..1.5f
-                        )
+                    SovereignPrimaryButton(
+                        text = stringResource(R.string.settings_new_profile),
+                        onClick = {
+                            editingProfile = null
+                            isCreatingProfile = true
+                            profileNameDraft = ""
+                            profileTextDraft = ""
+                            profileSaveError = null
+                        },
+                        leadingIcon = Icons.Rounded.Add,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
 
-                        Spacer(Modifier.height(8.dp))
+                    Column(verticalArrangement = Arrangement.spacedBy(spacing.sm)) {
+                        state.profiles.forEach { profile ->
+                            val isSelected = profile.id == state.activeProfile.id
+                            val isBuiltIn = profile.id == PromptProfile.DEFAULT_ID ||
+                                profile.id == PromptProfile.UNRESTRICTED_ID
 
-                        Text(
-                            text = "Top-P: ${String.format(java.util.Locale.US, "%.2f", topP)}",
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.Medium
-                        )
-                        Slider(
-                            value = topP,
-                            onValueChange = onTopPChange,
-                            valueRange = 0.1f..1.0f
-                        )
-
-                        Spacer(Modifier.height(8.dp))
-
-                        Text(
-                            text = "Max Output Tokens: $maxTokens",
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.Medium
-                        )
-                        Slider(
-                            value = maxTokens.toFloat(),
-                            onValueChange = { onMaxTokensChange(it.toInt()) },
-                            valueRange = 256f..4096f,
-                            steps = 14
-                        )
-                    }
-
-                    // 5. Persistent Cross-Chat Memory
-                    SettingsSection(title = "Persistent Memory") {
-                        Surface(
-                            shape = RoundedCornerShape(12.dp),
-                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            SovereignHairlineCard(
+                                modifier = Modifier.fillMaxWidth(),
+                                selected = isSelected,
+                                onClick = { onActiveProfileChange(profile) },
+                            ) {
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text("Cross-Chat Memory", fontWeight = FontWeight.SemiBold)
-                                        Text(
-                                            "Remember key user & project facts across sessions",
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                    }
-                                    Switch(
-                                        checked = isMemoryEnabled,
-                                        onCheckedChange = onToggleMemory
-                                    )
-                                }
-
-                                OutlinedButton(
-                                    onClick = onManageMemories,
-                                    modifier = Modifier.fillMaxWidth(),
-                                    shape = RoundedCornerShape(10.dp)
-                                ) {
-                                    Icon(Icons.Default.Psychology, contentDescription = null, modifier = Modifier.size(16.dp))
-                                    Spacer(Modifier.width(6.dp))
-                                    Text("Inspect & Manage Stored Memories")
-                                }
-                            }
-                        }
-                    }
-
-                    // 6. Chat Mode
-                    SettingsSection(title = "Inference Mode") {
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Text("Selected mode", fontWeight = FontWeight.Medium)
-                                Surface(
-                                    shape = RoundedCornerShape(8.dp),
-                                    color = if (chatMode == UnrestrictedMode.UNRESTRICTED)
-                                        MaterialTheme.colorScheme.primaryContainer
-                                    else
-                                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
-                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                                ) {
-                                    Text(
-                                        text = chatMode.displayName,
-                                        style = MaterialTheme.typography.labelMedium,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                }
-                            }
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                UnrestrictedMode.entries.forEach { mode ->
-                                    FilterChip(
-                                        selected = mode == chatMode,
-                                        onClick = { onChatModeChange(mode) },
-                                        label = { Text(mode.displayName) },
-                                        modifier = Modifier.weight(1f)
-                                    )
-                                }
-                            }
-                            Text(
-                                text = "Unrestricted mode changes the system prompt and uses the active prompt profile below. " +
-                                    "It does not remove restrictions present in the model weights or local inference wrapper.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-
-                    // 6b. Prompt Profiles
-                    SettingsSection(title = "Prompt Profiles") {
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text(
-                                text = "Active profile: ${activeProfile.name}",
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = FontWeight.Medium
-                            )
-                            Text(
-                                text = activeProfile.instructionText.ifBlank { "(No custom instructions)" },
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 3,
-                                modifier = Modifier.heightIn(max = 80.dp)
-                            )
-                            Spacer(Modifier.height(4.dp))
-                            profiles.forEach { profile ->
-                                val isSelected = profile.id == activeProfile.id
-                                Surface(
-                                    shape = RoundedCornerShape(10.dp),
-                                    color = if (isSelected)
-                                        MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)
-                                    else
-                                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clickable { onActiveProfileChange(profile) }
+                                    verticalAlignment = Alignment.CenterVertically,
                                 ) {
                                     Row(
-                                        modifier = Modifier.padding(10.dp),
                                         verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.SpaceBetween
+                                        horizontalArrangement = Arrangement.spacedBy(spacing.xs),
+                                        modifier = Modifier.weight(1f),
                                     ) {
-                                        Column(modifier = Modifier.weight(1f)) {
-                                            Text(
-                                                text = profile.name,
-                                                fontWeight = FontWeight.SemiBold
-                                            )
-                                            Text(
-                                                text = profile.instructionText.ifBlank { "Empty profile" },
-                                                style = MaterialTheme.typography.bodySmall,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                                maxLines = 2
-                                            )
-                                        }
-                                        IconButton(onClick = { onProfileReset(profile.id) }) {
-                                            Icon(
-                                                Icons.Default.Refresh,
-                                                contentDescription = "Reset profile to its original text",
-                                                modifier = Modifier.size(18.dp),
-                                                tint = MaterialTheme.colorScheme.onSurfaceVariant
-                                            )
-                                        }
-                                    }
-                                }
-                                Spacer(Modifier.height(4.dp))
-                            }
-                        }
-                    }
-
-                    // 6c. Profile Editor
-                    SettingsSection(title = "Edit / Save Prompt Profile") {
-                        // Key on the profile id so switching the active profile resets the
-                        // draft instead of keeping stale text from the previous profile.
-                        var editorName by remember(activeProfile.id) { mutableStateOf(activeProfile.name) }
-                        var editorText by remember(activeProfile.id) { mutableStateOf(activeProfile.instructionText) }
-                        var editorError by remember(activeProfile.id) { mutableStateOf<String?>(null) }
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            editorError?.let { msg ->
-                                Text(
-                                    text = msg,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.error
-                                )
-                            }
-                            OutlinedTextField(
-                                value = editorText,
-                                onValueChange = { editorText = it },
-                                modifier = Modifier.fillMaxWidth(),
-                                minLines = 3,
-                                maxLines = 6,
-                                label = { Text("System prompt / instruction text") },
-                                isError = editorError != null,
-                                shape = RoundedCornerShape(12.dp)
-                            )
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                OutlinedTextField(
-                                    value = editorName,
-                                    onValueChange = { editorName = it },
-                                    modifier = Modifier.weight(1f),
-                                    label = { Text("Profile name") },
-                                    shape = RoundedCornerShape(10.dp)
-                                )
-                                IconButton(
-                                    onClick = {
-                                        // Save a NEW profile derived from the draft, keyed by
-                                        // name (so editing an existing profile updates it).
-                                        val trimmedName = editorName.trim()
-                                        val existing = profiles.firstOrNull {
-                                            it.name.equals(trimmedName, ignoreCase = true)
-                                        }
-                                        val toSave = (existing ?: PromptProfile(
-                                            name = trimmedName,
-                                            instructionText = editorText,
-                                            effectiveSystemPrompt = editorText
-                                        )).copy(
-                                            name = trimmedName,
-                                            instructionText = editorText,
-                                            effectiveSystemPrompt = editorText.ifBlank {
-                                                activeProfile.effectiveSystemPrompt
-                                            }
+                                        Text(
+                                            text = profile.name,
+                                            style = typography.cardTitle,
+                                            color = colors.textPrimary,
                                         )
-                                        val validationResult = toSave.validate()
-                                        if (validationResult != null) {
-                                            editorError = validationResult
-                                        } else {
-                                            onProfileSaved(toSave)
-                                            onActiveProfileChange(toSave)
-                                            editorError = null
+                                        if (isSelected) {
+                                            SovereignBadge(
+                                                text = stringResource(R.string.label_active),
+                                                tone = SovereignStatusTone.ACCENT,
+                                            )
                                         }
                                     }
-                                ) {
-                                    Icon(Icons.Default.Save, contentDescription = "Save profile")
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        SovereignIconButton(
+                                            onClick = {
+                                                isCreatingProfile = false
+                                                editingProfile = profile
+                                                profileNameDraft = profile.name
+                                                profileTextDraft = profile.instructionText
+                                                profileSaveError = null
+                                            },
+                                            contentDescription = "Edit profile",
+                                        ) {
+                                            Icon(Icons.Rounded.Edit, contentDescription = null, modifier = Modifier.size(18.dp))
+                                        }
+                                        if (isBuiltIn) {
+                                            SovereignIconButton(
+                                                onClick = { onProfileReset(profile.id) },
+                                                contentDescription = "Reset built-in profile",
+                                            ) {
+                                                Icon(Icons.Rounded.RestartAlt, contentDescription = null, modifier = Modifier.size(18.dp))
+                                            }
+                                        } else {
+                                            SovereignIconButton(
+                                                onClick = { profileToDelete = profile },
+                                                contentDescription = "Delete profile",
+                                                contentColor = colors.error,
+                                            ) {
+                                                Icon(Icons.Rounded.DeleteOutline, contentDescription = null, modifier = Modifier.size(18.dp))
+                                            }
+                                        }
+                                    }
                                 }
-                            }
-                        }
-                    }
-
-
-                    // 6. Theme Mode
-                    SettingsSection(title = "Theme") {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            ThemeMode.entries.forEach { mode ->
-                                FilterChip(
-                                    selected = mode == themeMode,
-                                    onClick = { onThemeModeChange(mode) },
-                                    label = { Text(mode.name.lowercase().replaceFirstChar { it.uppercase() }) },
-                                    modifier = Modifier.weight(1f)
+                                Spacer(Modifier.height(spacing.xs))
+                                Text(
+                                    text = profile.instructionText,
+                                    style = typography.bodyCompact,
+                                    color = colors.textSecondary,
                                 )
                             }
                         }
                     }
 
-                    // 7. Validation Status
-                    SettingsSection(title = "Inference Parameter Validation") {
-                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Text(
-                                text = "Inference parameters are validated before generation. " +
-                                    "Out-of-range values are blocked with a clear error.",
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = FontWeight.Medium
-                            )
-                        }
+                    SovereignTextField(
+                        value = state.systemPrompt,
+                        onValueChange = onSystemPromptChange,
+                        label = "Active System Prompt",
+                        minLines = 3,
+                        maxLines = 6,
+                    )
+                }
+
+                SettingsTab.DATA -> {
+                    Column(verticalArrangement = Arrangement.spacedBy(spacing.sm)) {
+                        SovereignSectionHeader(title = stringResource(R.string.settings_section_privacy))
+                        SovereignSwitchRow(
+                            title = stringResource(R.string.memory_enable_title),
+                            subtitle = stringResource(R.string.memory_enable_desc),
+                            checked = state.persistentMemoryEnabled,
+                            onCheckedChange = onToggleMemory,
+                            leadingIcon = Icons.Rounded.Psychology,
+                            hapticFeedback = state.hapticsEnabled,
+                        )
+                        SovereignSettingsRow(
+                            title = stringResource(R.string.settings_manage_memories),
+                            leadingIcon = Icons.Rounded.Psychology,
+                            showChevron = true,
+                            onClick = onManageMemories,
+                        )
+                        SovereignSettingsRow(
+                            title = stringResource(R.string.settings_open_diagnostics),
+                            subtitle = "${state.hardwareInfo.availRamMb} MB RAM free · ${state.hardwareInfo.thermalState.label}",
+                            leadingIcon = Icons.Rounded.MonitorHeart,
+                            showChevron = true,
+                            onClick = onOpenDiagnostics,
+                        )
                     }
 
-                    // 8. Device Diagnostics
-                    SettingsSection(title = "Device Health & Thermal State") {
-                        Surface(
-                            shape = RoundedCornerShape(12.dp),
-                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
-                                    Text("Thermal Status", style = MaterialTheme.typography.bodyMedium)
-                                    Text(
-                                        thermalState.label,
-                                        fontWeight = FontWeight.Bold,
-                                        color = if (thermalState.isWarning) MaterialTheme.colorScheme.error else QwenPrimary
-                                    )
-                                }
-                                Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
-                                    Text("Battery Temp", style = MaterialTheme.typography.bodyMedium)
-                                    Text("${String.format(java.util.Locale.US, "%.1f", batteryTemp)}°C", fontWeight = FontWeight.Bold)
-                                }
-                                Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
-                                    Text("Battery Level", style = MaterialTheme.typography.bodyMedium)
-                                    Text("$batteryPercent% ${if (isCharging) "(Charging)" else ""}", fontWeight = FontWeight.Bold)
-                                }
-                                Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
-                                    Text("Available RAM", style = MaterialTheme.typography.bodyMedium)
-                                    Text("${availRamMb}MB / ${totalRamMb}MB", fontWeight = FontWeight.Bold)
-                                }
+                    Column(verticalArrangement = Arrangement.spacedBy(spacing.sm)) {
+                        SovereignSectionHeader(title = stringResource(R.string.settings_section_about))
+                        SovereignHairlineCard(modifier = Modifier.fillMaxWidth()) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(spacing.xs),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Shield,
+                                    contentDescription = null,
+                                    tint = colors.accentPrimary,
+                                    modifier = Modifier.size(18.dp),
+                                )
+                                Text(
+                                    text = stringResource(R.string.app_display_name),
+                                    style = typography.cardTitle,
+                                    color = colors.textPrimary,
+                                )
                             }
+                            Spacer(Modifier.height(spacing.xs))
+                            Text(
+                                text = stringResource(R.string.empty_chat_subtitle),
+                                style = typography.bodyCompact,
+                                color = colors.textSecondary,
+                            )
                         }
                     }
                 }
             }
         }
-    }
-}
-
-@Composable
-fun SettingsSection(title: String, content: @Composable ColumnScope.() -> Unit) {
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text(
-            text = title,
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.Bold,
-            color = MaterialTheme.colorScheme.primary
-        )
-        content()
     }
 }

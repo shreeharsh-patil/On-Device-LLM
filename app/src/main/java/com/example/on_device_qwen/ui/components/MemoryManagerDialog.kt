@@ -1,332 +1,283 @@
 package com.example.on_device_qwen.ui.components
 
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
-import androidx.compose.material.icons.outlined.Delete
-import androidx.compose.material.icons.outlined.Edit
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.DeleteOutline
+import androidx.compose.material.icons.rounded.DeleteSweep
+import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.Psychology
+import androidx.compose.material3.Icon
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
+import com.example.on_device_qwen.R
 import com.example.on_device_qwen.model.MemoryCategory
 import com.example.on_device_qwen.model.MemoryItem
-import java.text.SimpleDateFormat
-import java.util.*
+import com.example.on_device_qwen.ui.designsystem.SovereignAlertDialog
+import com.example.on_device_qwen.ui.designsystem.SovereignBadge
+import com.example.on_device_qwen.ui.designsystem.SovereignElevation
+import com.example.on_device_qwen.ui.designsystem.SovereignEmptyState
+import com.example.on_device_qwen.ui.designsystem.SovereignHairlineCard
+import com.example.on_device_qwen.ui.designsystem.SovereignIconButton
+import com.example.on_device_qwen.ui.designsystem.SovereignModalSheet
+import com.example.on_device_qwen.ui.designsystem.SovereignPrimaryButton
+import com.example.on_device_qwen.ui.designsystem.SovereignSearchBar
+import com.example.on_device_qwen.ui.designsystem.SovereignSecondaryButton
+import com.example.on_device_qwen.ui.designsystem.SovereignStatusTone
+import com.example.on_device_qwen.ui.designsystem.SovereignSurface
+import com.example.on_device_qwen.ui.designsystem.SovereignSwitchRow
+import com.example.on_device_qwen.ui.designsystem.SovereignTextField
+import com.example.on_device_qwen.ui.designsystem.SovereignTheme
+import com.example.on_device_qwen.viewmodel.MemoryUiState
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MemoryManagerDialog(
-    memories: List<MemoryItem>,
-    isMemoryEnabled: Boolean,
+    state: MemoryUiState,
     onToggleMemory: (Boolean) -> Unit,
     onSaveMemory: (MemoryItem) -> Unit,
     onUpdateMemory: (String, String, MemoryCategory?) -> Unit,
     onDeleteMemory: (String) -> Unit,
     onClearAllMemories: () -> Unit,
     onSearchMemories: (String) -> Unit,
-    onDismiss: () -> Unit
+    onSelectCategory: (MemoryCategory?) -> Unit,
+    onDismiss: () -> Unit,
 ) {
-    var searchQuery by remember { mutableStateOf("") }
-    var selectedCategory by remember { mutableStateOf<MemoryCategory?>(null) }
+    val colors = SovereignTheme.colors
+    val typography = SovereignTheme.typography
+    val spacing = SovereignTheme.spacing
+
     var showAddDialog by remember { mutableStateOf(false) }
     var memoryToEdit by remember { mutableStateOf<MemoryItem?>(null) }
     var showClearConfirm by remember { mutableStateOf(false) }
 
-    // Dialog for adding / editing a memory
     if (showAddDialog || memoryToEdit != null) {
         val editing = memoryToEdit
         var contentText by remember(editing) { mutableStateOf(editing?.content ?: "") }
         var category by remember(editing) { mutableStateOf(editing?.category ?: MemoryCategory.USER) }
 
-        AlertDialog(
+        SovereignAlertDialog(
+            title = if (editing != null) "Edit Memory" else stringResource(R.string.memory_add_action),
+            confirmText = stringResource(R.string.label_save),
+            confirmEnabled = contentText.isNotBlank(),
+            onConfirm = {
+                val clean = contentText.trim()
+                if (editing != null) {
+                    onUpdateMemory(editing.id, clean, category)
+                } else {
+                    onSaveMemory(MemoryItem(category = category, content = clean))
+                }
+                showAddDialog = false
+                memoryToEdit = null
+            },
             onDismissRequest = {
                 showAddDialog = false
                 memoryToEdit = null
             },
-            title = { Text(if (editing != null) "Edit Memory" else "Add Memory", fontWeight = FontWeight.Bold) },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text("Category", style = MaterialTheme.typography.labelMedium)
+            content = {
+                Column(verticalArrangement = Arrangement.spacedBy(spacing.sm)) {
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(spacing.xs),
                     ) {
                         MemoryCategory.entries.forEach { cat ->
-                            FilterChip(
+                            MemoryCategoryChip(
+                                label = cat.displayName,
                                 selected = category == cat,
                                 onClick = { category = cat },
-                                label = { Text(cat.displayName, fontSize = 11.sp) }
                             )
                         }
                     }
-
-                    OutlinedTextField(
+                    SovereignTextField(
                         value = contentText,
                         onValueChange = { contentText = it },
-                        label = { Text("Memory Content") },
-                        modifier = Modifier.fillMaxWidth(),
+                        label = "Memory detail",
+                        placeholder = "e.g., Prefer concise Kotlin code without boilerplate.",
+                        singleLine = false,
                         minLines = 3,
                         maxLines = 6,
-                        shape = RoundedCornerShape(12.dp)
                     )
                 }
             },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        val trimmed = contentText.trim()
-                        if (trimmed.isNotBlank()) {
-                            if (editing != null) {
-                                onUpdateMemory(editing.id, trimmed, category)
-                            } else {
-                                onSaveMemory(MemoryItem(category = category, content = trimmed))
-                            }
-                        }
-                        showAddDialog = false
-                        memoryToEdit = null
-                    }
-                ) { Text("Save") }
-            },
-            dismissButton = {
-                TextButton(onClick = {
-                    showAddDialog = false
-                    memoryToEdit = null
-                }) { Text("Cancel") }
-            }
         )
     }
 
     if (showClearConfirm) {
-        AlertDialog(
-            onDismissRequest = { showClearConfirm = false },
-            title = { Text("Clear All Memories", fontWeight = FontWeight.Bold) },
-            text = { Text("Are you sure you want to permanently delete all cross-chat persistent memories? This action cannot be undone.") },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        onClearAllMemories()
-                        showClearConfirm = false
-                    },
-                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
-                ) { Text("Delete All") }
+        SovereignAlertDialog(
+            title = stringResource(R.string.memory_clear_title),
+            text = stringResource(R.string.memory_clear_body, state.totalMemoryCount),
+            confirmText = stringResource(R.string.memory_clear_all),
+            isDestructive = true,
+            onConfirm = {
+                onClearAllMemories()
+                showClearConfirm = false
             },
-            dismissButton = {
-                TextButton(onClick = { showClearConfirm = false }) { Text("Cancel") }
-            }
+            onDismissRequest = { showClearConfirm = false },
         )
     }
 
-    Dialog(
+    SovereignModalSheet(
+        title = stringResource(R.string.memory_title),
+        subtitle = "${state.totalMemoryCount} stored locally",
         onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false)
-    ) {
-        Surface(
-            modifier = Modifier
-                .fillMaxWidth(0.94f)
-                .fillMaxHeight(0.90f),
-            shape = RoundedCornerShape(20.dp),
-            color = MaterialTheme.colorScheme.surface,
-            tonalElevation = 6.dp
-        ) {
-            Column(modifier = Modifier.fillMaxSize()) {
-                // Header
+        headerActions = {
+            if (state.totalMemoryCount > 0) {
+                SovereignIconButton(
+                    onClick = { showClearConfirm = true },
+                    contentDescription = stringResource(R.string.memory_clear_all),
+                    contentColor = colors.error,
+                ) {
+                    Icon(Icons.Rounded.DeleteSweep, contentDescription = null, modifier = Modifier.size(20.dp))
+                }
+            }
+        },
+        stickyHeaderExtra = {
+            Column(verticalArrangement = Arrangement.spacedBy(spacing.sm)) {
+                SovereignSwitchRow(
+                    title = stringResource(R.string.memory_enable_title),
+                    subtitle = stringResource(R.string.memory_enable_desc),
+                    checked = state.isMemoryEnabled,
+                    onCheckedChange = onToggleMemory,
+                    leadingIcon = Icons.Rounded.Psychology,
+                    hapticFeedback = SovereignTheme.hapticsEnabled,
+                )
+                SovereignSearchBar(
+                    query = state.searchQuery,
+                    onQueryChange = onSearchMemories,
+                    placeholder = stringResource(R.string.memory_search_placeholder),
+                    modifier = Modifier.fillMaxWidth(),
+                )
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 20.dp, vertical = 16.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(spacing.xs),
                 ) {
-                    Column {
-                        Text(
-                            text = "Persistent Memory",
-                            style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.Bold
+                    MemoryCategoryChip(
+                        label = "All",
+                        selected = state.selectedCategory == null,
+                        onClick = { onSelectCategory(null) },
+                    )
+                    MemoryCategory.entries.forEach { cat ->
+                        MemoryCategoryChip(
+                            label = cat.displayName,
+                            selected = state.selectedCategory == cat,
+                            onClick = { onSelectCategory(cat) },
                         )
-                        Text(
-                            text = "Knowledge retained across all chats",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    IconButton(onClick = onDismiss) {
-                        Icon(Icons.Default.Close, contentDescription = "Close")
                     }
                 }
+            }
+        },
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .padding(horizontal = spacing.lg, vertical = spacing.md),
+        ) {
+            SovereignPrimaryButton(
+                text = stringResource(R.string.memory_add_action),
+                onClick = { showAddDialog = true },
+                leadingIcon = Icons.Rounded.Add,
+                modifier = Modifier.fillMaxWidth(),
+            )
 
-                HorizontalDivider()
+            Spacer(Modifier.height(spacing.md))
 
-                // Master Toggle Switch
-                Surface(
-                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 20.dp, vertical = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("Enable Persistent Memory", fontWeight = FontWeight.SemiBold)
-                            Text(
-                                if (isMemoryEnabled) "Assistant recalls relevant user & project facts in new chats"
-                                else "Memory retrieval and consolidation disabled",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+            if (state.memories.isEmpty()) {
+                SovereignEmptyState(
+                    title = stringResource(R.string.memory_empty_title),
+                    subtitle = stringResource(R.string.memory_empty_body),
+                    icon = Icons.Rounded.Psychology,
+                    action = if (state.searchQuery.isNotBlank() || state.selectedCategory != null) {
+                        {
+                            SovereignSecondaryButton(
+                                text = stringResource(R.string.drawer_clear_search),
+                                onClick = {
+                                    onSearchMemories("")
+                                    onSelectCategory(null)
+                                },
                             )
                         }
-                        Switch(
-                            checked = isMemoryEnabled,
-                            onCheckedChange = { onToggleMemory(it) }
-                        )
-                    }
-                }
-
-                // Search & Filter Bar
-                Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 10.dp)) {
-                    OutlinedTextField(
-                        value = searchQuery,
-                        onValueChange = {
-                            searchQuery = it
-                            onSearchMemories(it)
-                        },
-                        placeholder = { Text("Search memories…") },
-                        leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
-                        trailingIcon = {
-                            if (searchQuery.isNotEmpty()) {
-                                IconButton(onClick = {
-                                    searchQuery = ""
-                                    onSearchMemories("")
-                                }) {
-                                    Icon(Icons.Default.Close, contentDescription = "Clear search")
+                    } else null,
+                )
+            } else {
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(spacing.sm),
+                    contentPadding = PaddingValues(bottom = spacing.md),
+                ) {
+                    items(state.memories, key = { it.id }) { item ->
+                        val tone = when (item.category) {
+                            MemoryCategory.USER -> SovereignStatusTone.ACCENT
+                            MemoryCategory.PROJECT -> SovereignStatusTone.VIOLET
+                            MemoryCategory.EPISODIC -> SovereignStatusTone.NEUTRAL
+                        }
+                        SovereignHairlineCard(modifier = Modifier.fillMaxWidth()) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                SovereignBadge(
+                                    text = item.category.displayName,
+                                    tone = tone,
+                                )
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    SovereignIconButton(
+                                        onClick = { memoryToEdit = item },
+                                        contentDescription = "Edit memory",
+                                    ) {
+                                        Icon(Icons.Rounded.Edit, contentDescription = null, modifier = Modifier.size(18.dp))
+                                    }
+                                    SovereignIconButton(
+                                        onClick = { onDeleteMemory(item.id) },
+                                        contentDescription = "Delete memory",
+                                        contentColor = colors.error,
+                                    ) {
+                                        Icon(
+                                            Icons.Rounded.DeleteOutline,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(18.dp),
+                                        )
+                                    }
                                 }
                             }
-                        },
-                        singleLine = true,
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    )
-
-                    Spacer(Modifier.height(8.dp))
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            FilterChip(
-                                selected = selectedCategory == null,
-                                onClick = { selectedCategory = null },
-                                label = { Text("All (${memories.size})", fontSize = 11.sp) }
-                            )
-                            MemoryCategory.entries.forEach { cat ->
-                                val count = memories.count { it.category == cat }
-                                FilterChip(
-                                    selected = selectedCategory == cat,
-                                    onClick = { selectedCategory = if (selectedCategory == cat) null else cat },
-                                    label = { Text("${cat.displayName} ($count)", fontSize = 11.sp) }
-                                )
-                            }
-                        }
-                    }
-                }
-
-                // Memory Items List
-                val filteredMemories = memories.filter { item ->
-                    (selectedCategory == null || item.category == selectedCategory) &&
-                            (searchQuery.isBlank() || item.content.contains(searchQuery, ignoreCase = true) || item.keywords.contains(searchQuery, ignoreCase = true))
-                }
-
-                if (filteredMemories.isEmpty()) {
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxWidth(),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Icon(
-                                imageVector = Icons.Default.Psychology,
-                                contentDescription = null,
-                                modifier = Modifier.size(48.dp),
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
-                            )
-                            Spacer(Modifier.height(8.dp))
+                            Spacer(Modifier.height(spacing.xs))
                             Text(
-                                text = if (memories.isEmpty()) "No memories saved yet.\nTalk with the assistant or add one manually!" else "No matching memories found.",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                                text = item.content,
+                                style = typography.chatProse,
+                                color = colors.textPrimary,
                             )
                         }
-                    }
-                } else {
-                    LazyColumn(
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxWidth()
-                            .padding(horizontal = 20.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp),
-                        contentPadding = PaddingValues(vertical = 8.dp)
-                    ) {
-                        items(filteredMemories, key = { it.id }) { memory ->
-                            MemoryCardItem(
-                                memory = memory,
-                                onEdit = { memoryToEdit = memory },
-                                onDelete = { onDeleteMemory(memory.id) }
-                            )
-                        }
-                    }
-                }
-
-                HorizontalDivider()
-
-                // Bottom Action Bar
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 12.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    if (memories.isNotEmpty()) {
-                        TextButton(
-                            onClick = { showClearConfirm = true },
-                            colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
-                        ) {
-                            Icon(Icons.Outlined.Delete, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(Modifier.width(4.dp))
-                            Text("Clear All")
-                        }
-                    } else {
-                        Spacer(Modifier.width(1.dp))
-                    }
-
-                    FilledTonalButton(
-                        onClick = { showAddDialog = true },
-                        shape = RoundedCornerShape(12.dp)
-                    ) {
-                        Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("Add Memory")
                     }
                 }
             }
@@ -335,82 +286,32 @@ fun MemoryManagerDialog(
 }
 
 @Composable
-private fun MemoryCardItem(
-    memory: MemoryItem,
-    onEdit: () -> Unit,
-    onDelete: () -> Unit
+private fun MemoryCategoryChip(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
 ) {
-    val dateStr = remember(memory.updatedAt) {
-        val sdf = SimpleDateFormat("MMM d, yyyy", Locale.getDefault())
-        sdf.format(Date(memory.updatedAt))
-    }
-
-    Surface(
-        shape = RoundedCornerShape(14.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)),
-        modifier = Modifier.fillMaxWidth()
+    val colors = SovereignTheme.colors
+    SovereignSurface(
+        shape = SovereignTheme.shapes.pill,
+        color = if (selected) colors.accentContainer else colors.surfaceBase,
+        border = BorderStroke(
+            SovereignElevation.hairlineWidth,
+            if (selected) colors.accentPrimary else colors.hairlineSubtle,
+        ),
+        modifier = Modifier
+            .defaultMinSize(minHeight = 48.dp)
+            .clip(SovereignTheme.shapes.pill)
+            .clickable(role = Role.RadioButton, onClick = onClick),
     ) {
-        Column(modifier = Modifier.padding(14.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Surface(
-                    shape = RoundedCornerShape(6.dp),
-                    color = when (memory.category) {
-                        MemoryCategory.USER -> MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
-                        MemoryCategory.PROJECT -> MaterialTheme.colorScheme.tertiary.copy(alpha = 0.15f)
-                        MemoryCategory.EPISODIC -> MaterialTheme.colorScheme.secondary.copy(alpha = 0.15f)
-                    }
-                ) {
-                    Text(
-                        text = memory.category.displayName,
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = when (memory.category) {
-                            MemoryCategory.USER -> MaterialTheme.colorScheme.primary
-                            MemoryCategory.PROJECT -> MaterialTheme.colorScheme.tertiary
-                            MemoryCategory.EPISODIC -> MaterialTheme.colorScheme.secondary
-                        },
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
-                    )
-                }
-
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = dateStr,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
-                    )
-                    Spacer(Modifier.width(6.dp))
-                    IconButton(onClick = onEdit, modifier = Modifier.size(28.dp)) {
-                        Icon(
-                            imageVector = Icons.Outlined.Edit,
-                            contentDescription = "Edit memory",
-                            modifier = Modifier.size(15.dp),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    IconButton(onClick = onDelete, modifier = Modifier.size(28.dp)) {
-                        Icon(
-                            imageVector = Icons.Outlined.Delete,
-                            contentDescription = "Delete memory",
-                            modifier = Modifier.size(15.dp),
-                            tint = MaterialTheme.colorScheme.error.copy(alpha = 0.8f)
-                        )
-                    }
-                }
-            }
-
-            Spacer(Modifier.height(8.dp))
-
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+        ) {
             Text(
-                text = memory.content,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurface,
-                lineHeight = 20.sp
+                text = label,
+                style = SovereignTheme.typography.actionLabel,
+                color = if (selected) colors.onAccentContainer else colors.textSecondary,
             )
         }
     }

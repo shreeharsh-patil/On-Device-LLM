@@ -1,1092 +1,1829 @@
 package com.example.on_device_qwen.viewmodel
 
 import android.app.Application
+import android.content.Context
 import android.net.Uri
+import android.os.SystemClock
+import androidx.annotation.VisibleForTesting
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.on_device_qwen.data.preferences.AppPreferences
 import com.example.on_device_qwen.data.preferences.PerformanceMode
 import com.example.on_device_qwen.data.preferences.ThemeMode
 import com.example.on_device_qwen.data.repository.ConversationRepository
-import com.example.on_device_qwen.domain.engine.GgufMetadataParser
+import com.example.on_device_qwen.domain.context.PromptContextBuilder
+import com.example.on_device_qwen.domain.context.PromptValidation
+import com.example.on_device_qwen.domain.context.PromptValidationError
+import com.example.on_device_qwen.domain.engine.EngineCapabilities
 import com.example.on_device_qwen.domain.engine.InferenceEngine
 import com.example.on_device_qwen.domain.engine.InferenceEngineFactory
+import com.example.on_device_qwen.domain.memory.MemoryManager
+import com.example.on_device_qwen.domain.modelmanager.ImportProgress
+import com.example.on_device_qwen.domain.modelmanager.ModelImportState
 import com.example.on_device_qwen.domain.modelmanager.ModelRepository
 import com.example.on_device_qwen.domain.performance.DeviceThermalState
 import com.example.on_device_qwen.domain.performance.MemoryMonitor
 import com.example.on_device_qwen.domain.performance.ThermalPerformanceManager
-import com.example.on_device_qwen.model.*
+import com.example.on_device_qwen.domain.tts.TtsManager
+import com.example.on_device_qwen.model.BackendType
+import com.example.on_device_qwen.model.BenchmarkMetrics
+import com.example.on_device_qwen.model.ChatMessage
+import com.example.on_device_qwen.model.ConversationSession
+import com.example.on_device_qwen.model.EngineType
+import com.example.on_device_qwen.model.ExecutionBackendInfo
+import com.example.on_device_qwen.model.GenerationConfig
+import com.example.on_device_qwen.model.MemoryCategory
+import com.example.on_device_qwen.model.MemoryItem
+import com.example.on_device_qwen.model.MessageIdGenerator
+import com.example.on_device_qwen.model.ModelCompatibilityStatus
+import com.example.on_device_qwen.model.ModelErrorCode
+import com.example.on_device_qwen.model.ModelMetadata
+import com.example.on_device_qwen.model.PromptProfile
+import com.example.on_device_qwen.model.UnrestrictedMode
+import com.example.on_device_qwen.model.sanitizeSystemPrompt
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
-sealed class EngineState {
-    data object Idle : EngineState()
-    data class Loading(val progress: String) : EngineState()
-    data object Ready : EngineState()
-    data class Error(
-        val message: String,
-        val title: String = "Engine Error",
-        val errorCode: ModelErrorCode = ModelErrorCode.UNKNOWN,
-        val canRequestPermission: Boolean = false,
-        val canOpenFilePicker: Boolean = true,
-        val candidateFile: File? = null
-    ) : EngineState()
+internal data class ChatViewModelDependencies(
+    val repository: ConversationRepository,
+    val modelHub: ModelHubCoordinator,
+    val prefs: AppPreferences,
+    val memoryManager: MemoryManager,
+    val engineProvider: (File) -> InferenceEngine,
+    val thermalStateFlow: StateFlow<DeviceThermalState>,
+    val batteryTempFlow: StateFlow<Float>,
+    val batteryPercentFlow: StateFlow<Int>,
+    val isChargingFlow: StateFlow<Boolean>,
+    val adaptiveThreadCountFn: (PerformanceMode, Int) -> Int,
+    val cleanupThermalFn: () -> Unit,
+    val speakFn: (String) -> Unit,
+    val stopSpeakFn: () -> Unit,
+    val shutdownTtsFn: () -> Unit,
+    val isSpeakingFlow: StateFlow<Boolean>,
+    val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    val autoInitialize: Boolean = true,
+    val clockMs: () -> Long = { SystemClock.elapsedRealtime() },
+    val streamThrottleMs: Long = 45L,
+    val uriCacheCopier: (Uri) -> File? = { null },
+) {
+    companion object {
+        fun production(application: Application): ChatViewModelDependencies {
+            val repository = ConversationRepository(application)
+            val prefs = AppPreferences(application)
+            val modelRepository = ModelRepository(application)
+            val memoryMonitor = MemoryMonitor(application)
+            val thermalManager = ThermalPerformanceManager(application)
+            val ttsManager = TtsManager(application)
+            val engineFactory = InferenceEngineFactory(application)
+            return ChatViewModelDependencies(
+                repository = repository,
+                modelHub = ModelHubCoordinator(application, modelRepository, memoryMonitor),
+                prefs = prefs,
+                memoryManager = MemoryManager(repository, prefs),
+                engineProvider = { file -> engineFactory.getEngineForModel(file) },
+                thermalStateFlow = thermalManager.thermalState,
+                batteryTempFlow = thermalManager.batteryTempCelsius,
+                batteryPercentFlow = thermalManager.batteryLevelPercent,
+                isChargingFlow = thermalManager.isCharging,
+                adaptiveThreadCountFn = { mode, threads ->
+                    thermalManager.getAdaptiveThreadCount(mode, threads)
+                },
+                cleanupThermalFn = { thermalManager.cleanup() },
+                speakFn = { text -> ttsManager.speak(text) },
+                stopSpeakFn = { ttsManager.stop() },
+                shutdownTtsFn = { ttsManager.shutdown() },
+                isSpeakingFlow = ttsManager.isSpeaking,
+                uriCacheCopier = { uri -> copyImageUriToCache(application, uri) },
+            )
+        }
+
+        private fun copyImageUriToCache(app: Application, uri: Uri): File? = try {
+            val targetFile = File(app.cacheDir, "vlm_input_${MessageIdGenerator.nextId()}.jpg")
+            app.contentResolver.openInputStream(uri)?.use { input ->
+                targetFile.outputStream().use { output -> input.copyTo(output) }
+            }
+            if (targetFile.exists() && targetFile.length() > 0L) targetFile else null
+        } catch (_: Exception) {
+            null
+        }
+    }
 }
 
-class ChatViewModel(application: Application) : AndroidViewModel(application) {
+class ChatViewModel private constructor(
+    application: Application,
+    private val deps: ChatViewModelDependencies,
+) : AndroidViewModel(application) {
 
-    private val repository = ConversationRepository(application)
-    private val modelRepository = ModelRepository(application)
-    private val prefs = AppPreferences(application)
-    private val memoryManager = com.example.on_device_qwen.domain.memory.MemoryManager(repository, prefs)
-    private val engineFactory = InferenceEngineFactory(application)
-    private val thermalManager = ThermalPerformanceManager(application)
-    private val memoryMonitor = MemoryMonitor(application)
-    private val ttsManager = com.example.on_device_qwen.domain.tts.TtsManager(application)
+    constructor(application: Application) : this(
+        application,
+        ChatViewModelDependencies.production(application),
+    )
+
+    companion object {
+        private const val UI_PREFS_NAME = "on_device_qwen_prefs"
+        private const val KEY_ONBOARDING_COMPLETED = "onboarding_completed"
+        private const val DEFAULT_MODEL_PLACEHOLDER = "Select Model"
+        private const val SEARCH_DEBOUNCE_MS = 180L
+
+        @VisibleForTesting
+        internal fun createForTest(
+            application: Application,
+            dependencies: ChatViewModelDependencies,
+        ): ChatViewModel = ChatViewModel(application, dependencies)
+    }
+
+    private val uiPrefs by lazy {
+        application.getSharedPreferences(UI_PREFS_NAME, Context.MODE_PRIVATE)
+    }
+
+    // Serialization & concurrency primitives
+    private val engineMutex = Mutex()
+    private val sendSlotClaimed = AtomicBoolean(false)
+    private val loadRequestSeq = AtomicLong(0L)
+    private val stateLock = Any()
 
     private var activeEngine: InferenceEngine? = null
     private var generationJob: Job? = null
+    private var conversationLoadJob: Job? = null
+    private var searchConversationsJob: Job? = null
+    private var searchMemoriesJob: Job? = null
     private var activeGenerationId: String? = null
 
-    val isSpeaking: StateFlow<Boolean> = ttsManager.isSpeaking
+    // Backing domain state fields (protected for consistent publication via stateLock)
+    private var engineStateValue: EngineState = EngineState.Idle
+    private var modelTitleValue: String = DEFAULT_MODEL_PLACEHOLDER
+    private var activeModelMetadataValue: ModelMetadata? = null
+    private var executionBackendInfoValue: ExecutionBackendInfo? = null
+    private var engineCapabilitiesValue: EngineCapabilities? = null
+    private var isVisionSupportedValue: Boolean = false
+    private var visionUnsupportedReasonValue: String? = null
+    private var isGeneratingValue: Boolean = false
+    private var isSpeakingValue: Boolean = deps.isSpeakingFlow.value
 
-    // ── Memory State Flows ─────────────────────────────────────────────────────
-    private val _persistentMemoryEnabled = MutableStateFlow(prefs.persistentMemoryEnabled)
-    val persistentMemoryEnabled: StateFlow<Boolean> = _persistentMemoryEnabled.asStateFlow()
+    private var discoveredModelsValue: List<ModelMetadata> = emptyList()
+    private var importStateValue: ModelImportState = ModelImportState()
+    private var importErrorValue: String? = null
+    private var isScanningValue: Boolean = false
 
-    private val _allMemories = MutableStateFlow<List<com.example.on_device_qwen.model.MemoryItem>>(emptyList())
-    val allMemories: StateFlow<List<com.example.on_device_qwen.model.MemoryItem>> = _allMemories.asStateFlow()
+    private var conversationsValue: List<ConversationSession> = emptyList()
+    private var activeConversationValue: ConversationSession? = null
+    private var messagesValue: List<ChatMessage> = emptyList()
+    private var conversationSearchQuery: String = ""
 
-    private val _lastUsedMemories = MutableStateFlow<List<com.example.on_device_qwen.model.MemoryItem>>(emptyList())
-    val lastUsedMemories: StateFlow<List<com.example.on_device_qwen.model.MemoryItem>> = _lastUsedMemories.asStateFlow()
+    private var persistentMemoryEnabledValue: Boolean = deps.prefs.persistentMemoryEnabled
+    private var allMemoriesMasterValue: List<MemoryItem> = emptyList()
+    private var displayedMemoriesValue: List<MemoryItem> = emptyList()
+    private var lastUsedMemoriesValue: List<MemoryItem> = emptyList()
+    private var memorySearchQuery: String = ""
+    private var selectedMemoryCategory: MemoryCategory? = null
 
-    // ── State Flows ───────────────────────────────────────────────────────────
-    private val _engineState = MutableStateFlow<EngineState>(EngineState.Idle)
-    val engineState: StateFlow<EngineState> = _engineState.asStateFlow()
+    private var currentBackendValue: BackendType = deps.prefs.backendType
+    private var performanceModeValue: PerformanceMode = deps.prefs.performanceMode
+    private var temperatureValue: Float = deps.prefs.temperature
+    private var topPValue: Float = deps.prefs.topP
+    private var repetitionPenaltyValue: Float = deps.prefs.repetitionPenalty
+    private var maxTokensValue: Int = deps.prefs.maxOutputTokens
+    private var contextLengthValue: Int = deps.prefs.contextLength
+    private var systemPromptValue: String = deps.prefs.systemPrompt
+    private var threadCountValue: Int = deps.prefs.threadCount
+    private var themeModeValue: ThemeMode = deps.prefs.themeMode
+    private var hapticsEnabledValue: Boolean = deps.prefs.hapticsEnabled
+    private var chatModeValue: UnrestrictedMode = deps.prefs.unrestrictedMode
+    private var activeProfileValue: PromptProfile = deps.prefs.activePromptProfile
+    private var profilesValue: List<PromptProfile> = deps.prefs.promptProfiles
 
-    private val _conversations = MutableStateFlow<List<ConversationSession>>(emptyList())
-    val conversations: StateFlow<List<ConversationSession>> = _conversations.asStateFlow()
+    private var validationErrorsValue: List<PromptValidationError> = emptyList()
+    private var validationBannerValue: String? = null
+    private var backendFallbackBannerValue: String? = null
+    private var transientErrorBannerValue: String? = null
+    private var onboardingCompletedValue: Boolean = uiPrefs.getBoolean(KEY_ONBOARDING_COMPLETED, false)
+    private var onboardingExplicitlyShown: Boolean = false
+    private var hardwareInfoValue: DeviceHardwareInfo = sampleHardwareInfo()
 
-    private val _activeConversation = MutableStateFlow<ConversationSession?>(null)
-    val activeConversation: StateFlow<ConversationSession?> = _activeConversation.asStateFlow()
-
-    private val _messages = MutableStateFlow<List<ChatMessage>>(emptyList())
-    val messages: StateFlow<List<ChatMessage>> = _messages.asStateFlow()
-
-    private val _isGenerating = MutableStateFlow(false)
-    val isGenerating: StateFlow<Boolean> = _isGenerating.asStateFlow()
-
-    private val _modelTitle = MutableStateFlow("Qwen")
-    val modelTitle: StateFlow<String> = _modelTitle.asStateFlow()
-
-    private val _discoveredModels = MutableStateFlow<List<ModelMetadata>>(emptyList())
-    val discoveredModels: StateFlow<List<ModelMetadata>> = _discoveredModels.asStateFlow()
-
-    private val _availableModels = MutableStateFlow<List<File>>(emptyList())
-    val availableModels: StateFlow<List<File>> = _availableModels.asStateFlow()
-
-    private val _currentBackend = MutableStateFlow(prefs.backendType)
-    val currentBackend: StateFlow<BackendType> = _currentBackend.asStateFlow()
-
-    private val _performanceMode = MutableStateFlow(prefs.performanceMode)
-    val performanceMode: StateFlow<PerformanceMode> = _performanceMode.asStateFlow()
-
-    private val _isVisionModel = MutableStateFlow(false)
-    val isVisionModel: StateFlow<Boolean> = _isVisionModel.asStateFlow()
-
-    private val _searchQuery = MutableStateFlow("")
-    val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
-
-    private val _importProgress = MutableStateFlow<Float?>(null)
-    val importProgress: StateFlow<Float?> = _importProgress.asStateFlow()
-
-    // Telemetry & Hardware State
-    val thermalState: StateFlow<DeviceThermalState> = thermalManager.thermalState
-    val batteryTemp: StateFlow<Float> = thermalManager.batteryTempCelsius
-    val batteryPercent: StateFlow<Int> = thermalManager.batteryLevelPercent
-    val isCharging: StateFlow<Boolean> = thermalManager.isCharging
-
-    private val _availRamMb = MutableStateFlow(memoryMonitor.getMemoryStatus().availRamMb)
-    val availRamMb: StateFlow<Long> = _availRamMb.asStateFlow()
-
-    private val _totalRamMb = MutableStateFlow(memoryMonitor.getMemoryStatus().totalRamMb)
-    val totalRamMb: StateFlow<Long> = _totalRamMb.asStateFlow()
-
-    // Preferences & Config State
-    private val _temperature = MutableStateFlow(prefs.temperature)
-    val temperature: StateFlow<Float> = _temperature.asStateFlow()
-
-    private val _topP = MutableStateFlow(prefs.topP)
-    val topP: StateFlow<Float> = _topP.asStateFlow()
-
-    private val _maxTokens = MutableStateFlow(prefs.maxOutputTokens)
-    val maxTokens: StateFlow<Int> = _maxTokens.asStateFlow()
-
-    private val _repetitionPenalty = MutableStateFlow(prefs.repetitionPenalty)
-    val repetitionPenalty: StateFlow<Float> = _repetitionPenalty.asStateFlow()
-
-    private val _contextLength = MutableStateFlow(prefs.contextLength)
-    val contextLength: StateFlow<Int> = _contextLength.asStateFlow()
-
-    private val _systemPrompt = MutableStateFlow(prefs.systemPrompt)
-    val systemPrompt: StateFlow<String> = _systemPrompt.asStateFlow()
-
-    private val _threadCount = MutableStateFlow(prefs.threadCount)
-    val threadCount: StateFlow<Int> = _threadCount.asStateFlow()
-
-    private val _themeMode = MutableStateFlow(prefs.themeMode)
+    // Consolidated @Immutable UI StateFlows
+    private val _themeMode = MutableStateFlow(themeModeValue)
     val themeMode: StateFlow<ThemeMode> = _themeMode.asStateFlow()
 
-    private val _hapticsEnabled = MutableStateFlow(prefs.hapticsEnabled)
+    private val _hapticsEnabled = MutableStateFlow(hapticsEnabledValue)
     val hapticsEnabled: StateFlow<Boolean> = _hapticsEnabled.asStateFlow()
 
-    private val _chatMode = MutableStateFlow(prefs.unrestrictedMode)
-    val chatMode: StateFlow<UnrestrictedMode> = _chatMode.asStateFlow()
+    private val _chatUiState = MutableStateFlow(buildChatUiState())
+    val chatUiState: StateFlow<ChatScreenUiState> = _chatUiState.asStateFlow()
 
-    private val _activeProfile = MutableStateFlow(prefs.activePromptProfile)
-    val activeProfile: StateFlow<PromptProfile> = _activeProfile.asStateFlow()
+    private val _modelHubUiState = MutableStateFlow(buildModelHubUiState())
+    val modelHubUiState: StateFlow<ModelHubUiState> = _modelHubUiState.asStateFlow()
 
-    private val _profiles = MutableStateFlow(prefs.promptProfiles)
-    val profiles: StateFlow<List<PromptProfile>> = _profiles.asStateFlow()
+    private val _settingsUiState = MutableStateFlow(buildSettingsUiState())
+    val settingsUiState: StateFlow<SettingsUiState> = _settingsUiState.asStateFlow()
 
-    private var lastValidationResult: List<com.example.on_device_qwen.domain.context.PromptValidationError> = emptyList()
+    private val _memoryUiState = MutableStateFlow(buildMemoryUiState())
+    val memoryUiState: StateFlow<MemoryUiState> = _memoryUiState.asStateFlow()
 
-    /** First blocking inference-parameter error, surfaced as a UI banner. */
-    private val _validationBanner = MutableStateFlow<String?>(null)
-    val validationBanner: StateFlow<String?> = _validationBanner.asStateFlow()
+    private val _navigationUiState = MutableStateFlow(buildNavigationUiState())
+    val navigationUiState: StateFlow<NavigationUiState> = _navigationUiState.asStateFlow()
 
     init {
+        observeHardwareTelemetry()
+        validateCurrentConfig()
         loadConversations()
         loadMemories()
-        initializeEngine()
-        validateCurrentConfig()
-    }
-
-    fun validateCurrentConfig(): List<com.example.on_device_qwen.domain.context.PromptValidationError> {
-        val config = currentGenerationConfig()
-        lastValidationResult = com.example.on_device_qwen.domain.context.PromptValidation.validate(config)
-        if (lastValidationResult.isEmpty()) {
-            _validationBanner.value = null
-        } else {
-            _validationBanner.value = lastValidationResult.first().message
+        if (deps.autoInitialize) {
+            initializeEngine()
         }
-        return lastValidationResult
     }
 
-    fun dismissValidationBanner() {
-        _validationBanner.value = null
-    }
-
-    /**
-     * Returns active parameter validation errors followed by engine runtime
-     * support notices from [PromptValidation.auditRuntimeSupport].
-     */
-    fun runtimeSupportNotices(): List<String> {
-        val config = currentGenerationConfig()
-        val errors = com.example.on_device_qwen.domain.context.PromptValidation
-            .validate(config)
-            .map { it.message }
-        val runtimeNotes = com.example.on_device_qwen.domain.context.PromptValidation
-            .auditRuntimeSupport(config)
-            .map { it.message }
-        return (errors + runtimeNotes).distinct()
-    }
-
-    fun currentGenerationConfig(): GenerationConfig {
-        val threads = thermalManager.getAdaptiveThreadCount(_performanceMode.value, _threadCount.value)
-            .coerceIn(GenerationConfig.MIN_THREAD_COUNT, GenerationConfig.MAX_THREAD_COUNT)
-        val activeProfile = _activeProfile.value
-        // Single source of truth: resolved sanitized prompt, never raw duplicated text.
-        val resolvedPrompt = activeProfile.effectiveSystemPrompt
-            .ifBlank { activeProfile.instructionText }
-            .ifBlank { _systemPrompt.value }
-        return GenerationConfig(
-            temperature = _temperature.value.coerceIn(
-                GenerationConfig.MIN_TEMPERATURE, GenerationConfig.MAX_TEMPERATURE,
-            ),
-            topP = _topP.value.coerceIn(GenerationConfig.MIN_TOP_P, GenerationConfig.MAX_TOP_P),
-            repetitionPenalty = _repetitionPenalty.value.coerceIn(
-                GenerationConfig.MIN_REPETITION_PENALTY, GenerationConfig.MAX_REPETITION_PENALTY,
-            ),
-            maxOutputTokens = _maxTokens.value.coerceIn(
-                GenerationConfig.MIN_MAX_TOKENS, GenerationConfig.MAX_MAX_TOKENS,
-            ),
-            contextLength = _contextLength.value.coerceIn(
-                GenerationConfig.MIN_CONTEXT_LENGTH, GenerationConfig.MAX_CONTEXT_LENGTH,
-            ),
-            systemPrompt = com.example.on_device_qwen.model.sanitizeSystemPrompt(resolvedPrompt),
-            threadCount = threads,
-            backend = _currentBackend.value,
-            stopSequences = GenerationConfig.DEFAULT_STOP_SEQUENCES,
-            unrestrictedMode = _chatMode.value,
-            activePromptProfileId = activeProfile.id,
-        )
-    }
-
-    /** Surfaced to Settings UI: current validation state for unsupported params. */
-    fun validationErrors(): List<com.example.on_device_qwen.domain.context.PromptValidationError> =
-        lastValidationResult.toList()
-
-    fun setChatMode(mode: UnrestrictedMode) {
-        _chatMode.value = mode
-        prefs.unrestrictedMode = mode
-        // Switching modes swaps the ACTIVE profile so the actual inference prompt
-        // changes immediately for new/continued/regenerated responses.
-        val targetId = if (mode == UnrestrictedMode.UNRESTRICTED) PromptProfile.UNRESTRICTED_ID
-        else PromptProfile.DEFAULT_ID
-        val profiles = _profiles.value.ifEmpty { prefs.promptProfiles }
-        profiles.firstOrNull { it.id == targetId }?.let { setActiveProfile(it.id) }
-        validateCurrentConfig().also { lastValidationResult = it }
-    }
-
-    fun setActiveProfile(profileId: String) {
-        val profiles = _profiles.value.ifEmpty { prefs.promptProfiles }
-        val match = profiles.firstOrNull { it.id == profileId } ?: return
-        _activeProfile.value = match
-        prefs.setActivePromptProfile(match.id)
-        _systemPrompt.value = match.effectiveSystemPrompt.ifBlank { match.instructionText }
-        prefs.systemPrompt = _systemPrompt.value
-        validateCurrentConfig().also { lastValidationResult = it }
-    }
-
-    fun savePromptProfile(profile: PromptProfile): String? {
-        val error = profile.validate()
-        if (error != null) return error
-        prefs.addOrUpdateProfile(profile)
-        _profiles.value = prefs.promptProfiles
-        if (profile.id == _activeProfile.value.id) {
-            _activeProfile.value = profile.copy(
-                effectiveSystemPrompt = com.example.on_device_qwen.model.sanitizeSystemPrompt(
-                    profile.effectiveSystemPrompt.ifBlank { profile.instructionText }
-                ),
-            )
-            _systemPrompt.value = _activeProfile.value.effectiveSystemPrompt
-            prefs.systemPrompt = _systemPrompt.value
-        }
-        validateCurrentConfig().also { lastValidationResult = it }
-        return null
-    }
-
-    fun deletePromptProfile(profileId: String) {
-        prefs.removeProfile(profileId)
-        _profiles.value = prefs.promptProfiles
-        val current = _activeProfile.value
-        if (current.id == profileId) {
-            val fallback = _profiles.value.firstOrNull() ?: PromptProfile.standardDefault()
-            _activeProfile.value = fallback
-            prefs.setActivePromptProfile(fallback.id)
-            _systemPrompt.value = fallback.effectiveSystemPrompt.ifBlank { fallback.instructionText }
-        }
-        validateCurrentConfig().also { lastValidationResult = it }
-    }
-
-    fun resetPromptProfile(profileId: String) {
-        prefs.resetProfileToDefault(profileId)
-        _profiles.value = prefs.promptProfiles
-        _profiles.value.firstOrNull { it.id == profileId }?.let { restored ->
-            if (restored.id == _activeProfile.value.id) {
-                _activeProfile.value = restored
-                _systemPrompt.value = restored.effectiveSystemPrompt
-                prefs.systemPrompt = _systemPrompt.value
-            }
-        }
-        validateCurrentConfig().also { lastValidationResult = it }
-    }
-
-    fun setRepetitionPenalty(value: Float) {
-        val clamped = value.coerceIn(
-            GenerationConfig.MIN_REPETITION_PENALTY, GenerationConfig.MAX_REPETITION_PENALTY,
-        )
-        _repetitionPenalty.value = clamped
-        prefs.repetitionPenalty = clamped
-        validateCurrentConfig().also { lastValidationResult = it }
-    }
-
-    fun setContextLength(value: Int) {
-        val clamped = value.coerceIn(
-            GenerationConfig.MIN_CONTEXT_LENGTH, GenerationConfig.MAX_CONTEXT_LENGTH,
-        )
-        _contextLength.value = clamped
-        prefs.contextLength = clamped
-        validateCurrentConfig().also { lastValidationResult = it }
-    }
-
-
-    private fun loadConversations() {
+    private fun observeHardwareTelemetry() {
         viewModelScope.launch {
-            val list = repository.getAllConversations()
-            _conversations.value = list
-            if (list.isNotEmpty() && _activeConversation.value == null) {
-                selectConversation(list.first())
+            deps.isSpeakingFlow.collect { speaking ->
+                synchronized(stateLock) { isSpeakingValue = speaking }
+                publishUiStates()
+            }
+        }
+        viewModelScope.launch {
+            combine(
+                deps.thermalStateFlow,
+                deps.batteryTempFlow,
+                deps.batteryPercentFlow,
+                deps.isChargingFlow,
+            ) { _, _, _, _ -> Unit }.collect {
+                refreshDeviceStatusInternal()
             }
         }
     }
 
-    /**
-     * Initializes the LLM inference engine with the active or discovered model.
-     */
+    private fun sampleHardwareInfo(): DeviceHardwareInfo {
+        val caps = engineCapabilitiesValue
+        return deps.modelHub.readHardwareInfo(
+            thermalState = deps.thermalStateFlow.value,
+            batteryTempCelsius = deps.batteryTempFlow.value,
+            batteryPercent = deps.batteryPercentFlow.value,
+            isCharging = deps.isChargingFlow.value,
+            gpuSupported = caps?.supportsGpu ?: false,
+            npuSupported = caps?.supportsNpu ?: false,
+        )
+    }
+
+    fun refreshDeviceStatus() {
+        refreshDeviceStatusInternal()
+    }
+
+    private fun refreshDeviceStatusInternal() {
+        val hw = sampleHardwareInfo()
+        synchronized(stateLock) {
+            hardwareInfoValue = hw
+            discoveredModelsValue = discoveredModelsValue.map {
+                deps.modelHub.assessCompatibility(it, hw.availRamMb, hw.totalRamMb)
+            }
+        }
+        publishUiStates()
+    }
+
+    // ── Onboarding ────────────────────────────────────────────────────────────
+
+    fun completeOnboarding() {
+        uiPrefs.edit().putBoolean(KEY_ONBOARDING_COMPLETED, true).apply()
+        synchronized(stateLock) {
+            onboardingCompletedValue = true
+            onboardingExplicitlyShown = false
+        }
+        publishUiStates()
+    }
+
+    fun openOnboarding() {
+        refreshDeviceStatusInternal()
+        synchronized(stateLock) {
+            onboardingExplicitlyShown = true
+        }
+        publishUiStates()
+    }
+
+    // ── Engine & Model Lifecycle (Strictly Serialized) ────────────────────────
+
     fun initializeEngine(
         explicitModelFile: File? = null,
-        requestedBackend: BackendType? = null
+        requestedBackend: BackendType? = null,
     ) {
-        if (_engineState.value is EngineState.Loading) return
-
-        requestedBackend?.let {
-            _currentBackend.value = it
-            prefs.backendType = it
+        val mySeq = loadRequestSeq.incrementAndGet()
+        requestedBackend?.let { backend ->
+            synchronized(stateLock) { currentBackendValue = backend }
+            deps.prefs.backendType = backend
         }
 
-        // BUG-015 FIX: Set Loading state synchronously BEFORE launching coroutine to
-        // close the TOCTOU race window where two concurrent initializeEngine() calls
-        // could both pass the guard check before either sets the state.
-        _engineState.value = EngineState.Loading("Discovering models on device…")
+        val initialProgress = if (explicitModelFile != null) {
+            "Preparing ${explicitModelFile.nameWithoutExtension}…"
+        } else {
+            "Discovering local models…"
+        }
+        synchronized(stateLock) {
+            engineStateValue = EngineState.Loading(initialProgress)
+        }
+        publishUiStates()
 
         viewModelScope.launch {
-            try {
-                // Refresh memory stats
-                val mem = memoryMonitor.getMemoryStatus()
-                _availRamMb.value = mem.availRamMb
-                _totalRamMb.value = mem.totalRamMb
+            stopGenerationAndJoin()
 
-                // 1. Scan available models across registered paths, app directories, Downloads, and Documents
-                val allModels = modelRepository.scanModels()
-                _discoveredModels.value = allModels
-                _availableModels.value = allModels.map { it.file }
+            engineMutex.withLock {
+                if (mySeq != loadRequestSeq.get()) return@withLock
 
-                // 2. Select target model: explicit request > active preference > first discovered model
-                var targetFile = explicitModelFile?.takeIf { it.exists() && it.canRead() }
-                    ?: prefs.activeModelPath?.let { File(it) }?.takeIf { it.exists() && it.canRead() }
-                    ?: allModels.firstOrNull()?.file
+                try {
+                    val hw = sampleHardwareInfo()
+                    synchronized(stateLock) {
+                        hardwareInfoValue = hw
+                        isScanningValue = true
+                    }
+                    publishUiStates()
 
-                // 3. If still no target, run deep diagnosis (permission check, incomplete downloads, unregistered files)
-                if (targetFile == null) {
-                    val diag = modelRepository.diagnoseModelStatus()
+                    val allModels = deps.modelHub.scanAndAssessModels(hw.availRamMb, hw.totalRamMb)
+                    synchronized(stateLock) {
+                        discoveredModelsValue = allModels
+                        isScanningValue = false
+                    }
 
-                    // Auto-recovery: if diagnostic found candidate models, automatically register and select the first one!
-                    if (diag.candidateFiles.isNotEmpty()) {
+                    var targetFile = explicitModelFile?.takeIf { it.exists() && it.canRead() }
+                        ?: deps.prefs.activeModelPath?.let(::File)?.takeIf { it.exists() && it.canRead() }
+                        ?: allModels.firstOrNull()?.file
+
+                    if (targetFile == null) {
+                        val diag = deps.modelHub.diagnoseMissingModels()
                         val recovered = diag.candidateFiles.firstOrNull { it.exists() && it.canRead() }
                         if (recovered != null) {
-                            prefs.registerModelPath(recovered.absolutePath)
+                            deps.prefs.registerModelPath(recovered.absolutePath)
                             targetFile = recovered
+                        } else {
+                            // Unload any previously active handle safely before entering Idle/Error
+                            unloadActiveEngineLocked()
+                            synchronized(stateLock) {
+                                engineStateValue = if (diag.errorCode == ModelErrorCode.MODEL_FILE_NOT_FOUND) {
+                                    EngineState.Idle
+                                } else {
+                                    EngineState.Error(
+                                        title = diag.title,
+                                        message = "This model file cannot be read directly due to Android scoped storage. Use 'Import Model' via the system file picker instead.",
+                                        errorCode = diag.errorCode,
+                                        canRequestPermission = false,
+                                        canOpenFilePicker = true,
+                                        candidateFile = diag.candidateFiles.firstOrNull(),
+                                    )
+                                }
+                            }
+                            publishUiStates()
+                            return@withLock
                         }
                     }
 
-                    if (targetFile == null) {
-                        _engineState.value = EngineState.Error(
-                            title = diag.title,
-                            message = diag.message,
-                            errorCode = diag.errorCode,
-                            canRequestPermission = diag.canRequestPermission,
-                            canOpenFilePicker = diag.canOpenFilePicker,
-                            candidateFile = diag.candidateFiles.firstOrNull()
+                    if (!targetFile.canRead()) {
+                        unloadActiveEngineLocked()
+                        synchronized(stateLock) {
+                            engineStateValue = EngineState.Error(
+                                title = "File Access Unavailable",
+                                message = "Cannot read '${targetFile.name}' from its current folder. Import it with the system file picker so the app receives persistent scoped access.",
+                                errorCode = ModelErrorCode.FILE_UNREADABLE_OR_PERMISSION_DENIED,
+                                canRequestPermission = false,
+                                canOpenFilePicker = true,
+                                candidateFile = targetFile,
+                            )
+                        }
+                        publishUiStates()
+                        return@withLock
+                    }
+
+                    val targetMetadata = allModels.find { canonicalPathOf(it.file) == canonicalPathOf(targetFile) }
+                        ?: deps.modelHub.assessCompatibility(
+                            deps.modelHub.parseOrFallbackMetadata(targetFile),
+                            hw.availRamMb,
+                            hw.totalRamMb,
                         )
-                        return@launch
+
+                    if (targetMetadata.isCorrupted ||
+                        targetMetadata.compatibilityStatus == ModelCompatibilityStatus.CORRUPTED
+                    ) {
+                        unloadActiveEngineLocked()
+                        synchronized(stateLock) {
+                            engineStateValue = EngineState.Error(
+                                title = "Model File Corrupted",
+                                message = targetMetadata.compatibilityMessage
+                                    ?: "'${targetMetadata.name}' failed format validation and cannot be loaded.",
+                                errorCode = ModelErrorCode.MODEL_INITIALIZATION_FAILED,
+                                canOpenFilePicker = true,
+                            )
+                        }
+                        publishUiStates()
+                        return@withLock
                     }
-                }
 
-                // 4. Validate target file readability
-                if (!targetFile.canRead()) {
-                    _engineState.value = EngineState.Error(
-                        title = "Storage Permission Required",
-                        message = "The model file '${targetFile.name}' is unreadable. Android requires 'All files access' permission or file picker import to access it.",
-                        errorCode = ModelErrorCode.FILE_UNREADABLE_OR_PERMISSION_DENIED,
-                        canRequestPermission = true,
-                        canOpenFilePicker = true,
-                        candidateFile = targetFile
-                    )
-                    return@launch
-                }
+                    // Unload old native engine BEFORE measuring available RAM and loading new model
+                    unloadActiveEngineLocked()
+                    val refreshedHw = sampleHardwareInfo()
+                    synchronized(stateLock) { hardwareInfoValue = refreshedHw }
 
-                // 5. Parse or retrieve metadata
-                val targetMetadata = allModels.find { it.file.absolutePath == targetFile.absolutePath }
-                    ?: modelRepository.parseMetadata(targetFile)
-                    ?: ModelMetadata(
-                        file = targetFile,
-                        name = targetFile.nameWithoutExtension,
-                        format = if (targetFile.extension.equals("gguf", true) || modelRepository.isGgufBinary(targetFile)) ModelFormat.GGUF else ModelFormat.LITERT,
-                        engineType = if (targetFile.extension.equals("gguf", true) || modelRepository.isGgufBinary(targetFile)) EngineType.LLAMA_CPP else EngineType.LITERT,
-                        fileSizeBytes = targetFile.length()
-                    )
-
-                // 6. Check RAM requirements before loading
-                val requiredRamMb = targetMetadata.estimatedRamMb
-                if (requiredRamMb > 0 && mem.availRamMb > 0 && mem.availRamMb < requiredRamMb / 2) {
-                    _engineState.value = EngineState.Error(
-                        title = "Insufficient RAM",
-                        message = "Model '${targetMetadata.name}' requires approx ${requiredRamMb}MB RAM, but this device only has ${mem.availRamMb}MB available. Please close background apps or select a smaller model.",
-                        errorCode = ModelErrorCode.INSUFFICIENT_RAM,
-                        canOpenFilePicker = true
-                    )
-                    return@launch
-                }
-
-                _modelTitle.value = targetMetadata.name
-                _isVisionModel.value = targetMetadata.hasVision
-                prefs.activeModelPath = targetFile.absolutePath
-                prefs.registerModelPath(targetFile.absolutePath)
-
-                val backend = _currentBackend.value
-                val threads = thermalManager.getAdaptiveThreadCount(_performanceMode.value, _threadCount.value)
-
-                val config = currentGenerationConfig()
-
-                _engineState.value = EngineState.Loading(
-                    "Loading ${targetMetadata.name} (${targetMetadata.fileSizeMb} MB) on ${backend.chipText}…\nUsing $threads threads."
-                )
-
-                // 7. Unload previous engine before replacing it
-                activeEngine?.unloadModel()
-                val engine = engineFactory.getEngineForModel(targetFile)
-                activeEngine = engine
-
-                // 8. Initialize inference engine
-                val loadResult = engine.loadModel(targetFile, config)
-                if (loadResult.isSuccess && engine.isLoaded) {
-                    // 9. Successfully verified! Transition to Ready
-                    _engineState.value = EngineState.Ready
-                } else {
-                    val ex = loadResult.exceptionOrNull()
-                    val errorCode = when (ex) {
-                        is UnsupportedOperationException -> ModelErrorCode.MISSING_RUNTIME_OR_INCOMPATIBLE_ABI
-                        is SecurityException -> ModelErrorCode.FILE_UNREADABLE_OR_PERMISSION_DENIED
-                        is java.io.FileNotFoundException -> ModelErrorCode.MODEL_FILE_NOT_FOUND
-                        else -> ModelErrorCode.MODEL_INITIALIZATION_FAILED
+                    val requiredRamMb = targetMetadata.estimatedRamMb.coerceAtLeast(targetMetadata.minRamMb)
+                    if (requiredRamMb > 0L && refreshedHw.availRamMb > 0L &&
+                        refreshedHw.availRamMb < requiredRamMb / 2L
+                    ) {
+                        synchronized(stateLock) {
+                            engineStateValue = EngineState.Error(
+                                title = "Insufficient RAM",
+                                message = "Model '${targetMetadata.name}' needs ~${requiredRamMb} MB RAM, while ${refreshedHw.availRamMb} MB is currently available. Close background apps or choose a smaller model.",
+                                errorCode = ModelErrorCode.INSUFFICIENT_RAM,
+                                canOpenFilePicker = true,
+                            )
+                        }
+                        publishUiStates()
+                        return@withLock
                     }
-                    val title = when (errorCode) {
-                        ModelErrorCode.MISSING_RUNTIME_OR_INCOMPATIBLE_ABI -> "Runtime Architecture Incompatible"
-                        ModelErrorCode.FILE_UNREADABLE_OR_PERMISSION_DENIED -> "Storage Permission Denied"
-                        ModelErrorCode.MODEL_FILE_NOT_FOUND -> "Model File Missing"
-                        else -> "Model Initialization Failed"
-                    }
-                    _engineState.value = EngineState.Error(
-                        title = title,
-                        message = "Could not initialize ${targetMetadata.name}:\n${ex?.localizedMessage ?: "Unknown error"}",
-                        errorCode = errorCode,
-                        canRequestPermission = errorCode == ModelErrorCode.FILE_UNREADABLE_OR_PERMISSION_DENIED,
-                        canOpenFilePicker = true
-                    )
-                }
 
-            } catch (e: Exception) {
-                _engineState.value = EngineState.Error(
-                    title = "Engine Error",
-                    message = "Unexpected error while setting up AI engine:\n${e.localizedMessage ?: e.toString()}",
-                    errorCode = ModelErrorCode.UNKNOWN,
-                    canOpenFilePicker = true
-                )
+                    val requestedBackendSnapshot = synchronized(stateLock) { currentBackendValue }
+                    val resolvedBackend = requestedBackendSnapshot.resolveForEngine(targetMetadata.engineType)
+                    val config = currentGenerationConfig().copy(backend = resolvedBackend)
+                    val threads = deps.adaptiveThreadCountFn(performanceModeValue, threadCountValue)
+
+                    synchronized(stateLock) {
+                        engineStateValue = EngineState.Loading(
+                            "Loading ${targetMetadata.name} (${targetMetadata.fileSizeMb} MB) · ${resolvedBackend.chipText} · $threads threads…",
+                        )
+                    }
+                    publishUiStates()
+
+                    val engine = deps.engineProvider(targetFile)
+                    val loadResult = withContext(deps.ioDispatcher) {
+                        engine.loadModelWithResult(targetFile.absolutePath, resolvedBackend, config)
+                    }
+
+                    // If a newer switchModel/switchBackend arrived while loading, discard this engine cleanly.
+                    if (mySeq != loadRequestSeq.get()) {
+                        withContext(NonCancellable + deps.ioDispatcher) {
+                            try { engine.unloadModel() } catch (_: Exception) {}
+                        }
+                        return@withLock
+                    }
+
+                    if (loadResult.success && engine.isLoaded) {
+                        activeEngine = engine
+                        val backendInfo = loadResult.backendInfo
+                        val caps = loadResult.capabilities
+                        deps.prefs.activeModelPath = targetFile.absolutePath
+                        deps.prefs.registerModelPath(targetFile.absolutePath)
+                        if (!onboardingCompletedValue) {
+                            uiPrefs.edit().putBoolean(KEY_ONBOARDING_COMPLETED, true).apply()
+                        }
+
+                        val fallbackMsg = if (backendInfo.isFallback) {
+                            buildString {
+                                append("Requested ${backendInfo.requested.chipText}; running on ${backendInfo.active.chipText}")
+                                backendInfo.fallbackReason?.takeIf { it.isNotBlank() }?.let { append(" ($it)") }
+                            }
+                        } else null
+
+                        synchronized(stateLock) {
+                            activeModelMetadataValue = targetMetadata
+                            modelTitleValue = targetMetadata.name
+                            engineCapabilitiesValue = caps
+                            executionBackendInfoValue = backendInfo
+                            currentBackendValue = backendInfo.active
+                            // Vision support derives strictly from verified engine capabilities, never filename
+                            isVisionSupportedValue = caps.supportsVision
+                            visionUnsupportedReasonValue = caps.unsupportedVisionReason
+                            backendFallbackBannerValue = fallbackMsg
+                            onboardingCompletedValue = true
+                            onboardingExplicitlyShown = false
+                            hardwareInfoValue = sampleHardwareInfo()
+                            engineStateValue = EngineState.Ready
+                        }
+                        validateCurrentConfig()
+                    } else {
+                        withContext(NonCancellable + deps.ioDispatcher) {
+                            try { engine.unloadModel() } catch (_: Exception) {}
+                        }
+                        val code = loadResult.errorCode ?: ModelErrorCode.MODEL_INITIALIZATION_FAILED
+                        val title = when (code) {
+                            ModelErrorCode.MISSING_RUNTIME_OR_INCOMPATIBLE_ABI -> "Runtime Architecture Incompatible"
+                            ModelErrorCode.FILE_UNREADABLE_OR_PERMISSION_DENIED -> "File Access Unavailable"
+                            ModelErrorCode.MODEL_FILE_NOT_FOUND -> "Model File Missing"
+                            ModelErrorCode.INSUFFICIENT_RAM -> "Insufficient RAM"
+                            else -> "Model Initialization Failed"
+                        }
+                        synchronized(stateLock) {
+                            engineStateValue = EngineState.Error(
+                                title = title,
+                                message = "Could not initialize ${targetMetadata.name}: ${loadResult.errorMessage ?: "Unknown error"}",
+                                errorCode = code,
+                                canRequestPermission = false,
+                                canOpenFilePicker = true,
+                            )
+                        }
+                    }
+                } catch (ce: CancellationException) {
+                    throw ce
+                } catch (e: Exception) {
+                    unloadActiveEngineLocked()
+                    synchronized(stateLock) {
+                        engineStateValue = EngineState.Error(
+                            title = "Engine Error",
+                            message = "Unexpected error while setting up engine: ${e.localizedMessage ?: e.toString()}",
+                            errorCode = ModelErrorCode.UNKNOWN,
+                            canOpenFilePicker = true,
+                        )
+                    }
+                } finally {
+                    synchronized(stateLock) { isScanningValue = false }
+                    publishUiStates()
+                }
             }
+        }
+    }
+
+    private suspend fun unloadActiveEngineLocked() {
+        val current = activeEngine
+        activeEngine = null
+        if (current != null) {
+            withContext(NonCancellable + deps.ioDispatcher) {
+                try { current.unloadModel() } catch (_: Exception) {}
+            }
+        }
+        synchronized(stateLock) {
+            activeModelMetadataValue = null
+            executionBackendInfoValue = null
+            engineCapabilitiesValue = null
+            isVisionSupportedValue = false
+            visionUnsupportedReasonValue = null
+            backendFallbackBannerValue = null
+            modelTitleValue = DEFAULT_MODEL_PLACEHOLDER
         }
     }
 
     fun onAppForegrounded() {
-        if (_engineState.value is EngineState.Error || _engineState.value is EngineState.Idle) {
+        refreshDeviceStatusInternal()
+        val state = synchronized(stateLock) { engineStateValue }
+        if (state is EngineState.Error || state is EngineState.Idle) {
             initializeEngine()
         }
     }
 
     fun switchModel(model: ModelMetadata) {
-        if (_isGenerating.value) stopGeneration()
         initializeEngine(explicitModelFile = model.file)
     }
 
     fun switchModel(file: File) {
-        if (_isGenerating.value) stopGeneration()
         initializeEngine(explicitModelFile = file)
     }
 
     fun switchBackend(backend: BackendType) {
-        if (_isGenerating.value) return
         initializeEngine(requestedBackend = backend)
     }
 
-    /**
-     * Deletes (if app-owned) and unregisters a discovered model, unloading and
-     * falling back to the next available model when deleting the active one.
-     */
     fun deleteModel(model: ModelMetadata): Boolean {
-        if (_engineState.value is EngineState.Loading) return false
-
         val targetPath = model.file.absolutePath
         val targetCanon = canonicalPathOf(model.file)
-        val activePrefCanon = prefs.activeModelPath?.let { canonicalPathOf(File(it)) }
-        val activeLoadedCanon = activeEngine?.activeModel?.file?.let { canonicalPathOf(it) }
-        val isDeletingActive = targetCanon == activePrefCanon || targetCanon == activeLoadedCanon
-
-        if (isDeletingActive) {
-            if (_isGenerating.value) stopGeneration()
-            prefs.activeModelPath = null
-        }
-        prefs.unregisterModelPath(targetPath)
-
-        _discoveredModels.value = _discoveredModels.value.filterNot { candidate ->
-            canonicalPathOf(candidate.file) == targetCanon
-        }
-        _availableModels.value = _discoveredModels.value.map { it.file }
 
         viewModelScope.launch {
-            if (isDeletingActive) {
-                withContext(Dispatchers.IO) {
-                    activeEngine?.unloadModel()
-                }
-                activeEngine = null
-                _isVisionModel.value = false
-                _modelTitle.value = "Qwen"
-            }
+            stopGenerationAndJoin()
 
-            val deleted = modelRepository.deleteModel(model.file)
-            val remaining = modelRepository.scanModels()
-            _discoveredModels.value = remaining
-            _availableModels.value = remaining.map { it.file }
+            var fallbackFile: File? = null
+            engineMutex.withLock {
+                val activePrefCanon = deps.prefs.activeModelPath?.let { canonicalPathOf(File(it)) }
+                val activeLoadedCanon = activeEngine?.activeModel?.file?.let { canonicalPathOf(it) }
+                val isDeletingActive = targetCanon == activePrefCanon || targetCanon == activeLoadedCanon
 
-            if (!deleted) {
-                _validationBanner.value = "Could not delete ${model.name}."
-            }
+                if (isDeletingActive) {
+                    deps.prefs.activeModelPath = null
+                    unloadActiveEngineLocked()
+                }
+                deps.prefs.unregisterModelPath(targetPath)
 
-            if (isDeletingActive) {
-                val fallback = remaining.firstOrNull { candidate ->
-                    canonicalPathOf(candidate.file) != targetCanon
+                val deleted = deps.modelHub.deleteModelFile(model.file)
+                val hw = sampleHardwareInfo()
+                val remaining = deps.modelHub.scanAndAssessModels(hw.availRamMb, hw.totalRamMb)
+
+                synchronized(stateLock) {
+                    hardwareInfoValue = hw
+                    discoveredModelsValue = remaining
+                    if (!deleted) {
+                        transientErrorBannerValue = "Could not delete ${model.name}."
+                    }
+                    if (isDeletingActive && remaining.none { canonicalPathOf(it.file) != targetCanon }) {
+                        engineStateValue = EngineState.Idle
+                    }
                 }
-                if (fallback != null) {
-                    initializeEngine(explicitModelFile = fallback.file)
-                } else {
-                    _engineState.value = EngineState.Idle
+                publishUiStates()
+
+                if (isDeletingActive) {
+                    fallbackFile = remaining.firstOrNull { canonicalPathOf(it.file) != targetCanon }?.file
                 }
             }
+            fallbackFile?.let { initializeEngine(explicitModelFile = it) }
         }
         return true
     }
 
-    private fun canonicalPathOf(file: File): String =
-        try { file.canonicalPath } catch (_: Exception) { file.absolutePath }
+    // ── Model Importing (Full Progress & Actionable Errors) ───────────────────
 
-    /**
-     * Send user message and stream token chunks to UI with real-time telemetry,
-     * conversation context, and persistent cross-chat memory retrieval.
-     */
+    fun importModel(uri: Uri) {
+        viewModelScope.launch {
+            synchronized(stateLock) {
+                importErrorValue = null
+                importStateValue = ModelImportState(progress = ImportProgress.COPYING)
+            }
+            publishUiStates()
+
+            val result = deps.modelHub.importModelSafely(uri) { state ->
+                synchronized(stateLock) { importStateValue = state }
+                publishUiStates()
+            }
+
+            if (result.isSuccess) {
+                val file = result.getOrElse { return@launch }
+                val hw = sampleHardwareInfo()
+                val scanned = deps.modelHub.scanAndAssessModels(hw.availRamMb, hw.totalRamMb)
+                synchronized(stateLock) {
+                    hardwareInfoValue = hw
+                    discoveredModelsValue = scanned
+                    importErrorValue = null
+                    importStateValue = ModelImportState(progress = ImportProgress.IDLE)
+                }
+                publishUiStates()
+                initializeEngine(explicitModelFile = file)
+            } else {
+                val message = result.exceptionOrNull()?.localizedMessage?.takeIf { it.isNotBlank() }
+                    ?: "Failed to import model. Verify the file is a valid .gguf or .litertlm model and enough storage is available."
+                synchronized(stateLock) {
+                    importErrorValue = message
+                    transientErrorBannerValue = message
+                }
+                publishUiStates()
+            }
+        }
+    }
+
+    fun dismissImportError() {
+        synchronized(stateLock) {
+            importErrorValue = null
+            if (importStateValue.progress == ImportProgress.FAILED) {
+                importStateValue = ModelImportState(progress = ImportProgress.IDLE)
+            }
+        }
+        publishUiStates()
+    }
+
+    fun dismissTransientError() {
+        synchronized(stateLock) { transientErrorBannerValue = null }
+        publishUiStates()
+    }
+
+    fun dismissBackendFallbackBanner() {
+        synchronized(stateLock) { backendFallbackBannerValue = null }
+        publishUiStates()
+    }
+
+    // ── Messaging, Streaming, Stop, Regenerate & Edit ─────────────────────────
+
     fun sendMessage(userText: String, imageUri: Uri? = null, isRegeneration: Boolean = false) {
         val trimmed = userText.trim()
-        if ((trimmed.isEmpty() && imageUri == null) || _isGenerating.value) return
+        if (trimmed.isEmpty() && imageUri == null) return
+
+        val visionSupported = synchronized(stateLock) { isVisionSupportedValue }
+        if (imageUri != null && !visionSupported) {
+            val reason = synchronized(stateLock) {
+                visionUnsupportedReasonValue ?: "Active model is text-only and does not support images."
+            }
+            synchronized(stateLock) { transientErrorBannerValue = reason }
+            publishUiStates()
+            return
+        }
+
         val engine = activeEngine ?: return
         if (!engine.isLoaded) return
 
-        viewModelScope.launch {
-            // Validate inference parameters BEFORE mutating chat state. Unsupported
-            // or out-of-range values produce a clear, readable error instead of
-            // silently reaching the native engine.
+        // Atomic check-and-claim BEFORE launching coroutine or touching DB/cache
+        if (!sendSlotClaimed.compareAndSet(false, true)) return
+        synchronized(stateLock) { isGeneratingValue = true }
+        publishUiStates()
+
+        generationJob = viewModelScope.launch {
+            runGenerationTurn(
+                engine = engine,
+                promptRawText = trimmed,
+                newImageUri = imageUri,
+                reusedImagePath = null,
+                prepareHistory = if (isRegeneration) {
+                    suspend { sessionId ->
+                        val current = synchronized(stateLock) { messagesValue }
+                        val lastBotIdx = current.indexOfLast { !it.isUser }
+                        if (lastBotIdx >= 0) {
+                            val toRemove = current.subList(lastBotIdx, current.size)
+                            withContext(deps.ioDispatcher) {
+                                toRemove.forEach { deps.repository.deleteMessage(it.id) }
+                            }
+                            synchronized(stateLock) {
+                                messagesValue = current.take(lastBotIdx)
+                            }
+                        }
+                        resetEngineForCurrentMode(synchronized(stateLock) { messagesValue })
+                    }
+                } else null,
+                insertUserTurn = !isRegeneration,
+            )
+        }
+    }
+
+    fun regenerateLastResponse() {
+        val current = synchronized(stateLock) { messagesValue }
+        val lastAssistant = current.lastOrNull { !it.isUser } ?: return
+        regenerateMessage(lastAssistant.id)
+    }
+
+    fun regenerateMessage(assistantMessageId: Long) {
+        val engine = activeEngine ?: return
+        if (!engine.isLoaded) return
+
+        val snapshot = synchronized(stateLock) { messagesValue }
+        val targetIdx = snapshot.indexOfFirst { it.id == assistantMessageId && !it.isUser }
+        if (targetIdx < 0) return
+        val precedingUser = snapshot.subList(0, targetIdx).lastOrNull { it.isUser } ?: return
+
+        if (!sendSlotClaimed.compareAndSet(false, true)) return
+        synchronized(stateLock) { isGeneratingValue = true }
+        publishUiStates()
+
+        generationJob = viewModelScope.launch {
+            runGenerationTurn(
+                engine = engine,
+                promptRawText = precedingUser.text,
+                newImageUri = null,
+                reusedImagePath = precedingUser.imagePath,
+                prepareHistory = { _ ->
+                    val current = synchronized(stateLock) { messagesValue }
+                    val idx = current.indexOfFirst { it.id == assistantMessageId }
+                    if (idx >= 0) {
+                        val dropped = current.subList(idx, current.size)
+                        withContext(deps.ioDispatcher) {
+                            dropped.forEach { deps.repository.deleteMessage(it.id) }
+                        }
+                        synchronized(stateLock) {
+                            messagesValue = current.take(idx)
+                        }
+                    }
+                    resetEngineForCurrentMode(synchronized(stateLock) { messagesValue })
+                },
+                insertUserTurn = false,
+            )
+        }
+    }
+
+    fun editAndResendMessage(messageId: Long, newText: String) {
+        val engine = activeEngine ?: return
+        if (!engine.isLoaded) return
+
+        val snapshot = synchronized(stateLock) { messagesValue }
+        val targetIdx = snapshot.indexOfFirst { it.id == messageId && it.isUser }
+        if (targetIdx < 0) return
+        val targetMsg = snapshot[targetIdx]
+
+        val cleanText = newText.trim()
+        if (cleanText.isEmpty() && targetMsg.imagePath == null) return
+
+        if (!sendSlotClaimed.compareAndSet(false, true)) return
+        synchronized(stateLock) { isGeneratingValue = true }
+        publishUiStates()
+
+        generationJob = viewModelScope.launch {
+            runGenerationTurn(
+                engine = engine,
+                promptRawText = cleanText,
+                newImageUri = null,
+                reusedImagePath = targetMsg.imagePath,
+                prepareHistory = { _ ->
+                    val current = synchronized(stateLock) { messagesValue }
+                    val idx = current.indexOfFirst { it.id == messageId }
+                    if (idx >= 0) {
+                        val dropped = current.subList(idx, current.size)
+                        withContext(deps.ioDispatcher) {
+                            dropped.forEach { deps.repository.deleteMessage(it.id) }
+                        }
+                        synchronized(stateLock) {
+                            messagesValue = current.take(idx)
+                        }
+                    }
+                    resetEngineForCurrentMode(synchronized(stateLock) { messagesValue })
+                },
+                insertUserTurn = true,
+            )
+        }
+    }
+
+    private suspend fun runGenerationTurn(
+        engine: InferenceEngine,
+        promptRawText: String,
+        newImageUri: Uri?,
+        reusedImagePath: String?,
+        prepareHistory: (suspend (String) -> Unit)?,
+        insertUserTurn: Boolean,
+    ) {
+        val generationId = UUID.randomUUID().toString()
+        activeGenerationId = generationId
+        val botMsgId = MessageIdGenerator.nextId()
+        var session: ConversationSession? = null
+        var accumulatedRaw = ""
+        var latestDirectThink: String? = null
+        var latestMetrics: BenchmarkMetrics? = null
+        val deltaTextBuffer = StringBuilder()
+        val deltaThinkBuffer = StringBuilder()
+
+        try {
             val baseConfig = currentGenerationConfig()
-            val validationErrors =
-                com.example.on_device_qwen.domain.context.PromptValidation.validate(baseConfig)
-            if (validationErrors.isNotEmpty()) {
-                val detail = validationErrors.joinToString("\n") { "- ${it.message}" }
-                val errorId = System.nanoTime()
-                val userVisibleError = ChatMessage(
-                    id = errorId,
-                    conversationId = _activeConversation.value?.id ?: "",
-                    text = "⚠️ Cannot generate — fix the highlighted inference settings first:\n$detail",
+            val errors = PromptValidation.validate(baseConfig)
+            if (errors.isNotEmpty()) {
+                val detail = errors.joinToString("\n") { "• ${it.message}" }
+                val convId = synchronized(stateLock) { activeConversationValue?.id ?: "" }
+                val validationErrorMsg = ChatMessage(
+                    id = MessageIdGenerator.nextId(),
+                    conversationId = convId,
+                    text = "Cannot generate — fix the highlighted inference settings first:\n$detail",
                     isUser = false,
                     isStreaming = false,
                     isError = true,
                 )
-                _messages.value = _messages.value + userVisibleError
-                _validationBanner.value = validationErrors.first().message
-                return@launch
-            }
-            _validationBanner.value = null
-            // Ensure an active conversation session exists in SQLite
-            var currentSession = _activeConversation.value
-            if (currentSession == null) {
-                val newSession = ConversationSession(
-                    id = UUID.randomUUID().toString(),
-                    title = trimmed.take(30).ifEmpty { "Image Query" },
-                    modelName = _modelTitle.value
-                )
-                repository.saveConversation(newSession)
-                _activeConversation.value = newSession
-                currentSession = newSession
-                _conversations.value = listOf(newSession) + _conversations.value
-            }
-
-            val session = currentSession
-            val promptText = if (trimmed.isNotEmpty()) trimmed else "Describe this image in detail."
-            val localImagePath = imageUri?.let {
-                withContext(Dispatchers.IO) { saveUriToCache(it)?.absolutePath }
-            }
-
-            if (isRegeneration) {
-                // BUG FIX: On regeneration, delete previous assistant message from DB and UI.
-                // Do NOT insert a duplicate user message!
-                repository.deleteLastAssistantMessage(session.id)
-                val lastBot = _messages.value.lastOrNull { !it.isUser }
-                if (lastBot != null) {
-                    _messages.value = _messages.value.filterNot { it.id == lastBot.id }
+                synchronized(stateLock) {
+                    validationErrorsValue = errors
+                    validationBannerValue = errors.first().message
+                    messagesValue = messagesValue + validationErrorMsg
                 }
-            } else {
-                // Add new user message to UI and database
+                publishUiStates()
+                return
+            }
+
+            synchronized(stateLock) {
+                validationErrorsValue = emptyList()
+                validationBannerValue = null
+            }
+
+            // Ensure an active conversation session exists in SQLite
+            session = synchronized(stateLock) { activeConversationValue } ?: run {
+                val created = ConversationSession(
+                    id = UUID.randomUUID().toString(),
+                    title = promptRawText.take(36).ifEmpty { "Image Query" },
+                    modelName = synchronized(stateLock) { modelTitleValue },
+                )
+                withContext(deps.ioDispatcher) {
+                    deps.repository.saveConversation(created)
+                }
+                synchronized(stateLock) {
+                    activeConversationValue = created
+                    conversationsValue = listOf(created) + conversationsValue
+                }
+                created
+            }
+
+            prepareHistory?.invoke(session.id)
+
+            val promptText = promptRawText.ifEmpty { "Describe this image in detail." }
+            val effectiveImagePath = reusedImagePath ?: newImageUri?.let { uri ->
+                withContext(deps.ioDispatcher) { deps.uriCacheCopier(uri)?.absolutePath }
+            }
+
+            if (insertUserTurn) {
                 val userMsg = ChatMessage(
+                    id = MessageIdGenerator.nextId(),
                     conversationId = session.id,
                     text = promptText,
-                    imagePath = localImagePath,
-                    isUser = true
+                    imagePath = effectiveImagePath,
+                    isUser = true,
                 )
-                _messages.value = _messages.value + userMsg
-                repository.saveMessage(userMsg)
+                synchronized(stateLock) { messagesValue = messagesValue + userMsg }
+                publishUiStates()
+                withContext(deps.ioDispatcher) {
+                    deps.repository.saveMessage(userMsg)
+                }
             }
 
-            // Assign unique generation ID to guarantee single authoritative stream reader
-            val generationId = UUID.randomUUID().toString()
-            activeGenerationId = generationId
-
-            // Retrieve relevant cross-chat persistent memories (works in BOTH modes;
-            // memories are delimited context, never trusted instructions).
-            val memoryContext = memoryManager.retrieveMemoryContext(promptText, session.id)
-            _lastUsedMemories.value = memoryContext.memories
-
+            val memoryContext = withContext(deps.ioDispatcher) {
+                deps.memoryManager.retrieveMemoryContext(promptText, session.id)
+            }
             val config = currentGenerationConfig().copy(generationId = generationId)
-            lastValidationResult =
-                com.example.on_device_qwen.domain.context.PromptValidation.validate(config)
+            val backendLabel = currentBackendDisplayLabel()
+            val modelName = synchronized(stateLock) { modelTitleValue }
 
-            // Build bounded, multi-turn conversation context. The active profile is
-            // passed through so mode switches + custom prompts apply to new,
-            // continued, AND regenerated responses. Switching chats passes a
-            // different history list, so prompts/history can't leak across chats.
-            val historyForPrompt = _messages.value
-            val formattedPrompt = com.example.on_device_qwen.domain.context.PromptContextBuilder.buildChatMl(
+            // Filter out error & streaming artifacts so failed turns never poison future context
+            val historyForPrompt = synchronized(stateLock) {
+                messagesValue.filterNot { it.isError || it.isStreaming }
+            }
+            val formattedPrompt = PromptContextBuilder.buildChatMl(
                 historyMessages = historyForPrompt,
                 latestUserPrompt = promptText,
                 memoryContext = memoryContext,
                 config = config,
-                promptProfile = _activeProfile.value,
-                profiles = _profiles.value,
+                profiles = synchronized(stateLock) { profilesValue },
+                promptProfile = synchronized(stateLock) { activeProfileValue },
             )
-            val estimatedPromptTokens = com.example.on_device_qwen.domain.context.PromptContextBuilder.estimateTokens(formattedPrompt)
+            val estimatedPromptTokens = PromptContextBuilder.estimateTokens(formattedPrompt)
+            latestMetrics = BenchmarkMetrics(
+                backend = backendLabel,
+                prefillTokens = estimatedPromptTokens,
+            )
 
-            val botMsgId = System.nanoTime()
-            val initialBotMsg = ChatMessage(
+            val placeholder = ChatMessage(
                 id = botMsgId,
                 conversationId = session.id,
                 text = "",
                 isUser = false,
                 isStreaming = true,
-                benchmark = BenchmarkMetrics(
-                    backend = _currentBackend.value.chipText,
-                    prefillTokens = estimatedPromptTokens
-                )
+                modelName = modelName,
+                backendLabel = backendLabel,
+                benchmark = latestMetrics,
             )
-            _messages.value = _messages.value + initialBotMsg
-            _isGenerating.value = true
+            synchronized(stateLock) {
+                lastUsedMemoriesValue = memoryContext.memories
+                messagesValue = messagesValue + placeholder
+            }
+            publishUiStates()
 
-            generationJob = viewModelScope.launch {
-                try {
-                    var lastUiUpdateMs = 0L
-                    engine.sendMessage(formattedPrompt, localImagePath, config).collect { chunk ->
-                        // Discard stale chunks from prior or cancelled generations
-                        if (activeGenerationId != generationId || _activeConversation.value?.id != session.id) {
-                            return@collect
-                        }
+            var lastUiUpdateMs = 0L
+            engine.sendMessage(formattedPrompt, effectiveImagePath, config).collect { chunk ->
+                if (activeGenerationId != generationId ||
+                    synchronized(stateLock) { activeConversationValue?.id != session.id }
+                ) {
+                    return@collect
+                }
 
-                        val now = android.os.SystemClock.elapsedRealtime()
-                        val isComplete = chunk.isComplete
-                        if (isComplete || now - lastUiUpdateMs >= 50L) {
-                            lastUiUpdateMs = now
-                            val parsed = parseReasoningTags(chunk.text)
-
-                            withContext(Dispatchers.Main) {
-                                if (activeGenerationId != generationId) return@withContext
-                                val current = _messages.value
-                                val targetIdx = current.indexOfLast { it.id == botMsgId }
-                                if (targetIdx >= 0) {
-                                    val updated = current.toMutableList()
-                                    updated[targetIdx] = updated[targetIdx].copy(
-                                        text = parsed.answer,
-                                        thinkText = parsed.think,
-                                        isStreaming = !chunk.isComplete,
-                                        benchmark = chunk.metrics
-                                    )
-                                    _messages.value = updated
-                                }
-                            }
-                        }
-
-                        if (chunk.isComplete) {
-                            val finalMsg = _messages.value.find { it.id == botMsgId }
-                            if (finalMsg != null) {
-                                repository.saveMessage(finalMsg.copy(isStreaming = false))
-                                // Asynchronously extract and consolidate persistent facts
-                                viewModelScope.launch(Dispatchers.IO) {
-                                    memoryManager.extractAndConsolidate(session.id, promptText, finalMsg.text)
-                                    loadMemories()
-                                }
-                            }
-                        }
+                if (chunk.hasError) {
+                    val errMsg = ChatMessage(
+                        id = botMsgId,
+                        conversationId = session.id,
+                        text = chunk.error ?: "Generation error occurred.",
+                        isUser = false,
+                        isStreaming = false,
+                        isError = true,
+                        modelName = modelName,
+                        backendLabel = backendLabel,
+                    )
+                    updateMessageInState(botMsgId) { errMsg }
+                    withContext(NonCancellable + deps.ioDispatcher) {
+                        deps.repository.saveMessage(errMsg)
                     }
-                } catch (e: Exception) {
-                    if (activeGenerationId == generationId) {
-                        val errorMsg = ChatMessage(
-                            id = botMsgId,
-                            conversationId = session.id,
-                            text = "⚠️ Error during generation: ${e.localizedMessage ?: e.toString()}",
-                            isUser = false,
-                            isStreaming = false,
-                            isError = true
+                    return@collect
+                }
+
+                // Support both delta-streaming (Wave 2 engines) and cumulative chunks (bff90bd engines)
+                accumulatedRaw = if (chunk.isDelta || (chunk.deltaText.isNotEmpty() && chunk.text.isEmpty())) {
+                    deltaTextBuffer.append(chunk.deltaText)
+                    deltaTextBuffer.toString()
+                } else if (chunk.text.isNotEmpty() || chunk.isComplete || chunk.isCancelled) {
+                    chunk.text
+                } else {
+                    accumulatedRaw
+                }
+
+                if (chunk.deltaThinking.isNotEmpty()) {
+                    deltaThinkBuffer.append(chunk.deltaThinking)
+                    latestDirectThink = deltaThinkBuffer.toString()
+                } else if (!chunk.thinking.isNullOrBlank()) {
+                    latestDirectThink = chunk.thinking
+                }
+
+                chunk.metrics?.let { metrics ->
+                    latestMetrics = metrics.copy(
+                        backend = backendLabel.ifBlank { metrics.backend },
+                        prefillTokens = metrics.prefillTokens ?: estimatedPromptTokens,
+                    )
+                }
+
+                val now = deps.clockMs()
+                val shouldPublish = chunk.isComplete ||
+                    chunk.isCancelled ||
+                    (now - lastUiUpdateMs >= deps.streamThrottleMs)
+
+                if (shouldPublish) {
+                    lastUiUpdateMs = now
+                    val parsed = parseReasoningTags(accumulatedRaw, latestDirectThink)
+                    val finalized = chunk.isComplete || chunk.isCancelled
+                    updateMessageInState(botMsgId) { existing ->
+                        existing.copy(
+                            text = parsed.answer,
+                            thinkText = parsed.think,
+                            isStreaming = !finalized,
+                            isCancelled = chunk.isCancelled,
+                            benchmark = latestMetrics,
+                            modelName = modelName,
+                            backendLabel = backendLabel,
                         )
-                        _messages.value = _messages.value.map { if (it.id == botMsgId) errorMsg else it }
-                        repository.saveMessage(errorMsg)
                     }
-                } finally {
-                    if (activeGenerationId == generationId) {
-                        _isGenerating.value = false
-                        activeGenerationId = null
+                }
+
+                if (chunk.isComplete) {
+                    val parsed = parseReasoningTags(accumulatedRaw, latestDirectThink)
+                    val finalMsg = synchronized(stateLock) {
+                        messagesValue.find { it.id == botMsgId }
+                    }?.copy(
+                        text = parsed.answer,
+                        thinkText = parsed.think,
+                        isStreaming = false,
+                        isCancelled = chunk.isCancelled,
+                        benchmark = latestMetrics,
+                        modelName = modelName,
+                        backendLabel = backendLabel,
+                    )
+                    if (finalMsg != null &&
+                        (finalMsg.text.isNotBlank() || !finalMsg.thinkText.isNullOrBlank())
+                    ) {
+                        withContext(NonCancellable + deps.ioDispatcher) {
+                            deps.repository.saveMessage(finalMsg)
+                            if (!chunk.isCancelled && finalMsg.text.isNotBlank()) {
+                                deps.memoryManager.extractAndConsolidate(
+                                    session.id,
+                                    promptText,
+                                    finalMsg.text,
+                                )
+                            }
+                        }
+                        if (!chunk.isCancelled && finalMsg.text.isNotBlank()) {
+                            loadMemories()
+                        }
+                    } else if (finalMsg != null && chunk.isCancelled) {
+                        removeMessageFromState(botMsgId)
                     }
-                    loadConversations()
                 }
             }
-        }
-    }
-
-    /**
-     * Instantly halts token generation and releases native stream readers.
-     */
-    fun stopGeneration() {
-        if (_isGenerating.value) {
-            activeGenerationId = null
-            generationJob?.cancel()
-            activeEngine?.cancelGeneration()
-            _isGenerating.value = false
-
-            // Mark any streaming message as complete
-            _messages.value = _messages.value.map {
-                if (it.isStreaming) it.copy(isStreaming = false) else it
+        } catch (ce: CancellationException) {
+            val activeConvId = session?.id
+            if (activeConvId != null && activeGenerationId == generationId) {
+                val parsed = parseReasoningTags(accumulatedRaw, latestDirectThink)
+                if (parsed.answer.isNotBlank() || !parsed.think.isNullOrBlank()) {
+                    val partialMsg = ChatMessage(
+                        id = botMsgId,
+                        conversationId = activeConvId,
+                        text = parsed.answer,
+                        thinkText = parsed.think,
+                        isUser = false,
+                        isStreaming = false,
+                        isCancelled = true,
+                        benchmark = latestMetrics,
+                        modelName = synchronized(stateLock) { modelTitleValue },
+                        backendLabel = currentBackendDisplayLabel(),
+                    )
+                    updateMessageInState(botMsgId) { partialMsg }
+                    withContext(NonCancellable + deps.ioDispatcher) {
+                        deps.repository.saveMessage(partialMsg)
+                    }
+                } else {
+                    removeMessageFromState(botMsgId)
+                }
+            }
+            throw ce
+        } catch (e: Exception) {
+            val activeConvId = session?.id
+            if (activeConvId != null && activeGenerationId == generationId) {
+                val errorMsg = ChatMessage(
+                    id = botMsgId,
+                    conversationId = activeConvId,
+                    text = "Error during generation: ${e.localizedMessage ?: e.toString()}",
+                    isUser = false,
+                    isStreaming = false,
+                    isError = true,
+                    modelName = synchronized(stateLock) { modelTitleValue },
+                    backendLabel = currentBackendDisplayLabel(),
+                )
+                updateMessageInState(botMsgId) { errorMsg }
+                withContext(NonCancellable + deps.ioDispatcher) {
+                    deps.repository.saveMessage(errorMsg)
+                }
+            }
+        } finally {
+            withContext(NonCancellable) {
+                if (activeGenerationId == generationId) {
+                    activeGenerationId = null
+                    synchronized(stateLock) { isGeneratingValue = false }
+                    sendSlotClaimed.set(false)
+                    publishUiStates()
+                }
+                refreshConversationsList()
             }
         }
     }
 
-    /**
-     * Regenerates the last assistant response without duplicating the user's prompt.
-     */
-    fun regenerateLastResponse() {
-        if (_isGenerating.value) return
-        val currentMsgs = _messages.value
-        val lastUserMsg = currentMsgs.lastOrNull { it.isUser } ?: return
-
-        sendMessage(
-            userText = lastUserMsg.text,
-            imageUri = lastUserMsg.imagePath?.let { Uri.fromFile(File(it)) },
-            isRegeneration = true
-        )
+    private fun updateMessageInState(messageId: Long, transform: (ChatMessage) -> ChatMessage) {
+        synchronized(stateLock) {
+            val idx = messagesValue.indexOfLast { it.id == messageId }
+            if (idx >= 0) {
+                val mutable = messagesValue.toMutableList()
+                mutable[idx] = transform(mutable[idx])
+                messagesValue = mutable
+            }
+        }
+        publishUiStates()
     }
 
-    /**
-     * Edit a previous user message and re-run conversation from that point.
-     */
-    fun editAndResendMessage(messageId: Long, newText: String) {
-        if (_isGenerating.value) return
-        val currentSession = _activeConversation.value ?: return
+    private fun removeMessageFromState(messageId: Long) {
+        synchronized(stateLock) {
+            messagesValue = messagesValue.filterNot { it.id == messageId }
+        }
+        publishUiStates()
+    }
 
-        viewModelScope.launch {
-            val targetMsg = _messages.value.find { it.id == messageId } ?: return@launch
-            repository.deleteMessagesAfter(currentSession.id, targetMsg.timestamp)
-            _messages.value = repository.getMessages(currentSession.id).filterNot { it.id == messageId }
-            sendMessage(newText, targetMsg.imagePath?.let { Uri.fromFile(File(it)) })
+    private fun currentBackendDisplayLabel(): String {
+        val info = synchronized(stateLock) { executionBackendInfoValue }
+        val activeBackend = info?.active ?: synchronized(stateLock) { currentBackendValue }
+        return if (info?.isFallback == true) {
+            "${activeBackend.chipText} (${info.requested.chipText} fallback)"
+        } else {
+            activeBackend.chipText
         }
     }
 
-    // ── Persistent Memory Operations ──────────────────────────────────────────
+    fun stopGeneration() {
+        val job = generationJob
+        activeEngine?.cancelGeneration()
+        job?.cancel()
+    }
+
+    private suspend fun stopGenerationAndJoin() {
+        val job = generationJob
+        activeEngine?.cancelGeneration()
+        if (job != null && job.isActive) {
+            job.cancelAndJoin()
+        }
+        generationJob = null
+        sendSlotClaimed.set(false)
+        synchronized(stateLock) { isGeneratingValue = false }
+        publishUiStates()
+    }
+
+    // ── Conversation Lifecycle ────────────────────────────────────────────────
+
+    private fun loadConversations() {
+        viewModelScope.launch {
+            val query = synchronized(stateLock) { conversationSearchQuery }
+            val list = withContext(deps.ioDispatcher) {
+                if (query.isBlank()) deps.repository.getAllConversations()
+                else deps.repository.searchConversations(query)
+            }
+            var initialToSelect: ConversationSession? = null
+            synchronized(stateLock) {
+                conversationsValue = list
+                if (list.isNotEmpty() && activeConversationValue == null) {
+                    initialToSelect = list.first()
+                }
+            }
+            publishUiStates()
+            initialToSelect?.let { selectConversation(it) }
+        }
+    }
+
+    private suspend fun refreshConversationsList() {
+        val query = synchronized(stateLock) { conversationSearchQuery }
+        val list = withContext(deps.ioDispatcher) {
+            if (query.isBlank()) deps.repository.getAllConversations()
+            else deps.repository.searchConversations(query)
+        }
+        synchronized(stateLock) { conversationsValue = list }
+        publishUiStates()
+    }
+
+    fun newChat() {
+        conversationLoadJob?.cancel()
+        viewModelScope.launch {
+            stopGenerationAndJoin()
+            engineMutex.withLock {
+                resetEngineForCurrentMode(emptyList())
+            }
+            synchronized(stateLock) {
+                activeConversationValue = null
+                messagesValue = emptyList()
+                lastUsedMemoriesValue = emptyList()
+            }
+            publishUiStates()
+        }
+    }
+
+    fun selectConversation(session: ConversationSession) {
+        conversationLoadJob?.cancel()
+        conversationLoadJob = viewModelScope.launch {
+            stopGenerationAndJoin()
+            synchronized(stateLock) {
+                activeConversationValue = session
+                messagesValue = emptyList()
+                lastUsedMemoriesValue = emptyList()
+            }
+            publishUiStates()
+
+            val loadedMessages = withContext(deps.ioDispatcher) {
+                deps.repository.getMessages(session.id)
+            }
+            if (synchronized(stateLock) { activeConversationValue?.id != session.id }) return@launch
+
+            engineMutex.withLock {
+                resetEngineForCurrentMode(loadedMessages)
+            }
+            if (synchronized(stateLock) { activeConversationValue?.id == session.id }) {
+                synchronized(stateLock) { messagesValue = loadedMessages }
+                publishUiStates()
+            }
+        }
+    }
+
+    fun renameConversation(session: ConversationSession, newTitle: String) {
+        val trimmed = newTitle.trim()
+        if (trimmed.isEmpty()) return
+        viewModelScope.launch {
+            withContext(deps.ioDispatcher) {
+                deps.repository.updateConversationTitle(session.id, trimmed)
+            }
+            synchronized(stateLock) {
+                if (activeConversationValue?.id == session.id) {
+                    activeConversationValue = activeConversationValue?.copy(title = trimmed)
+                }
+            }
+            refreshConversationsList()
+        }
+    }
+
+    fun deleteConversation(session: ConversationSession) {
+        viewModelScope.launch {
+            val isDeletingActive = synchronized(stateLock) { activeConversationValue?.id == session.id }
+            if (isDeletingActive) {
+                stopGenerationAndJoin()
+                engineMutex.withLock { resetEngineForCurrentMode(emptyList()) }
+                synchronized(stateLock) {
+                    activeConversationValue = null
+                    messagesValue = emptyList()
+                    lastUsedMemoriesValue = emptyList()
+                }
+            }
+            withContext(deps.ioDispatcher) {
+                deps.repository.deleteConversation(session.id)
+            }
+            refreshConversationsList()
+        }
+    }
+
+    fun togglePin(session: ConversationSession) {
+        viewModelScope.launch {
+            withContext(deps.ioDispatcher) {
+                deps.repository.togglePinConversation(session.id, !session.isPinned)
+            }
+            refreshConversationsList()
+        }
+    }
+
+    fun searchConversations(query: String) {
+        synchronized(stateLock) { conversationSearchQuery = query }
+        publishUiStates()
+        searchConversationsJob?.cancel()
+        searchConversationsJob = viewModelScope.launch {
+            if (query.isNotBlank()) delay(SEARCH_DEBOUNCE_MS)
+            refreshConversationsList()
+        }
+    }
+
+    fun formatConversationAsMarkdown(session: ConversationSession): suspend () -> String = {
+        val msgs = if (synchronized(stateLock) { activeConversationValue?.id == session.id }) {
+            synchronized(stateLock) { messagesValue }
+        } else {
+            withContext(deps.ioDispatcher) { deps.repository.getMessages(session.id) }
+        }
+        buildString {
+            append("# ${session.title}\n\n")
+            for (m in msgs) {
+                append(if (m.isUser) "## User\n" else "## Assistant\n")
+                if (!m.thinkText.isNullOrBlank()) {
+                    append("<details><summary>Reasoning</summary>\n\n")
+                    append(m.thinkText.trim())
+                    append("\n</details>\n\n")
+                }
+                append(m.text.trim())
+                append("\n\n---\n\n")
+            }
+        }
+    }
+
+    // ── Persistent Cross-Chat Memory (Non-destructive Search) ─────────────────
 
     fun loadMemories() {
         viewModelScope.launch {
-            _allMemories.value = repository.getAllMemories()
+            val list = withContext(deps.ioDispatcher) { deps.repository.getAllMemories() }
+            synchronized(stateLock) {
+                allMemoriesMasterValue = list
+                displayedMemoriesValue = applyMemoryFiltersLocked(list)
+            }
+            publishUiStates()
+        }
+    }
+
+    private fun applyMemoryFiltersLocked(source: List<MemoryItem>): List<MemoryItem> {
+        val query = memorySearchQuery.trim()
+        val category = selectedMemoryCategory
+        return source.filter { item ->
+            val matchesCat = category == null || item.category == category
+            val matchesQuery = query.isEmpty() ||
+                item.content.contains(query, ignoreCase = true) ||
+                item.keywords.contains(query, ignoreCase = true) ||
+                item.category.displayName.contains(query, ignoreCase = true)
+            matchesCat && matchesQuery
         }
     }
 
     fun togglePersistentMemory(enabled: Boolean) {
-        _persistentMemoryEnabled.value = enabled
-        prefs.persistentMemoryEnabled = enabled
+        deps.prefs.persistentMemoryEnabled = enabled
+        synchronized(stateLock) { persistentMemoryEnabledValue = enabled }
+        publishUiStates()
     }
 
-    fun saveMemory(item: com.example.on_device_qwen.model.MemoryItem) {
+    fun saveMemory(item: MemoryItem) {
         viewModelScope.launch {
-            repository.saveMemory(item)
+            withContext(deps.ioDispatcher) { deps.repository.saveMemory(item) }
             loadMemories()
         }
     }
 
-    fun updateMemory(id: String, content: String, category: com.example.on_device_qwen.model.MemoryCategory? = null) {
+    fun updateMemory(id: String, content: String, category: MemoryCategory? = null) {
         viewModelScope.launch {
-            repository.updateMemory(id, content, category)
+            withContext(deps.ioDispatcher) { deps.repository.updateMemory(id, content, category) }
             loadMemories()
         }
     }
 
     fun deleteMemory(id: String) {
         viewModelScope.launch {
-            repository.deleteMemory(id)
+            withContext(deps.ioDispatcher) { deps.repository.deleteMemory(id) }
             loadMemories()
         }
     }
 
     fun clearAllMemories() {
         viewModelScope.launch {
-            repository.clearAllMemories()
+            withContext(deps.ioDispatcher) { deps.repository.clearAllMemories() }
             loadMemories()
         }
     }
 
     fun searchMemories(query: String) {
-        viewModelScope.launch {
-            if (query.isBlank()) {
-                _allMemories.value = repository.getAllMemories()
-            } else {
-                _allMemories.value = repository.searchMemories(query)
+        synchronized(stateLock) {
+            memorySearchQuery = query
+            displayedMemoriesValue = applyMemoryFiltersLocked(allMemoriesMasterValue)
+        }
+        publishUiStates()
+        searchMemoriesJob?.cancel()
+        searchMemoriesJob = viewModelScope.launch {
+            if (query.isNotBlank()) delay(SEARCH_DEBOUNCE_MS)
+            val all = withContext(deps.ioDispatcher) { deps.repository.getAllMemories() }
+            synchronized(stateLock) {
+                allMemoriesMasterValue = all
+                displayedMemoriesValue = applyMemoryFiltersLocked(all)
+            }
+            publishUiStates()
+        }
+    }
+
+    fun selectMemoryCategory(category: MemoryCategory?) {
+        synchronized(stateLock) {
+            selectedMemoryCategory = category
+            displayedMemoriesValue = applyMemoryFiltersLocked(allMemoriesMasterValue)
+        }
+        publishUiStates()
+    }
+
+    // ── Inference Settings, Validation & Prompt Profiles ──────────────────────
+
+    fun validateCurrentConfig(): List<PromptValidationError> {
+        val config = currentGenerationConfig()
+        val errors = PromptValidation.validate(config)
+        synchronized(stateLock) {
+            validationErrorsValue = errors
+            validationBannerValue = errors.firstOrNull()?.message
+        }
+        publishUiStates()
+        return errors
+    }
+
+    fun dismissValidationBanner() {
+        synchronized(stateLock) { validationBannerValue = null }
+        publishUiStates()
+    }
+
+    fun runtimeSupportNotices(): List<String> {
+        val config = currentGenerationConfig()
+        val errors = PromptValidation.validate(config).map { it.message }
+        val runtimeNotes = PromptValidation.auditRuntimeSupport(config).map { it.message }
+        return (errors + runtimeNotes).distinct()
+    }
+
+    fun currentGenerationConfig(): GenerationConfig {
+        val threads = deps.adaptiveThreadCountFn(performanceModeValue, threadCountValue)
+            .coerceIn(GenerationConfig.MIN_THREAD_COUNT, GenerationConfig.MAX_THREAD_COUNT)
+        val profile = synchronized(stateLock) { activeProfileValue }
+        val resolvedPrompt = profile.effectiveSystemPrompt
+            .ifBlank { profile.instructionText }
+            .ifBlank { synchronized(stateLock) { systemPromptValue } }
+        return synchronized(stateLock) {
+            GenerationConfig(
+                temperature = temperatureValue.coerceIn(
+                    GenerationConfig.MIN_TEMPERATURE, GenerationConfig.MAX_TEMPERATURE,
+                ),
+                topP = topPValue.coerceIn(GenerationConfig.MIN_TOP_P, GenerationConfig.MAX_TOP_P),
+                repetitionPenalty = repetitionPenaltyValue.coerceIn(
+                    GenerationConfig.MIN_REPETITION_PENALTY, GenerationConfig.MAX_REPETITION_PENALTY,
+                ),
+                maxOutputTokens = maxTokensValue.coerceIn(
+                    GenerationConfig.MIN_MAX_TOKENS, GenerationConfig.MAX_MAX_TOKENS,
+                ),
+                contextLength = contextLengthValue.coerceIn(
+                    GenerationConfig.MIN_CONTEXT_LENGTH, GenerationConfig.MAX_CONTEXT_LENGTH,
+                ),
+                systemPrompt = sanitizeSystemPrompt(resolvedPrompt),
+                threadCount = threads,
+                backend = currentBackendValue,
+                stopSequences = GenerationConfig.DEFAULT_STOP_SEQUENCES,
+                unrestrictedMode = chatModeValue,
+                activePromptProfileId = profile.id,
+            )
+        }
+    }
+
+    fun setChatMode(mode: UnrestrictedMode) {
+        deps.prefs.unrestrictedMode = mode
+        synchronized(stateLock) { chatModeValue = mode }
+        val targetId = if (mode == UnrestrictedMode.UNRESTRICTED) PromptProfile.UNRESTRICTED_ID
+        else PromptProfile.DEFAULT_ID
+        val profiles = synchronized(stateLock) { profilesValue }.ifEmpty { deps.prefs.promptProfiles }
+        profiles.firstOrNull { it.id == targetId }?.let { setActiveProfile(it.id) }
+            ?: validateCurrentConfig()
+    }
+
+    fun setActiveProfile(profileId: String) {
+        val profiles = synchronized(stateLock) { profilesValue }.ifEmpty { deps.prefs.promptProfiles }
+        val match = profiles.firstOrNull { it.id == profileId } ?: return
+        deps.prefs.setActivePromptProfile(match.id)
+        val resolvedPrompt = match.effectiveSystemPrompt.ifBlank { match.instructionText }
+        deps.prefs.systemPrompt = resolvedPrompt
+        synchronized(stateLock) {
+            activeProfileValue = match
+            systemPromptValue = resolvedPrompt
+        }
+        validateCurrentConfig()
+    }
+
+    fun setActivePromptProfile(profile: PromptProfile) = setActiveProfile(profile.id)
+
+    fun savePromptProfile(profile: PromptProfile): String? {
+        val error = profile.validate()
+        if (error != null) return error
+        deps.prefs.addOrUpdateProfile(profile)
+        val updatedList = deps.prefs.promptProfiles
+        synchronized(stateLock) {
+            profilesValue = updatedList
+            if (profile.id == activeProfileValue.id) {
+                val resolved = sanitizeSystemPrompt(
+                    profile.effectiveSystemPrompt.ifBlank { profile.instructionText },
+                )
+                activeProfileValue = profile.copy(effectiveSystemPrompt = resolved)
+                systemPromptValue = resolved
+                deps.prefs.systemPrompt = resolved
             }
         }
-    }
-
-    // ── Conversation Lifecycle ────────────────────────────────────────────────
-    /** Resets engine state with the CURRENT mode prompt so chats never leak prompts. */
-    private fun resetEngineForCurrentMode() {
-        val engine = activeEngine
-        val prompt = currentGenerationConfig().systemPrompt
-        if (engine is com.example.on_device_qwen.domain.engine.LiteRTInferenceEngine) {
-            engine.resetConversationWithSystemPrompt(prompt)
-        } else {
-            engine?.resetConversation()
-        }
-    }
-
-    fun newChat() {
-        if (_isGenerating.value) stopGeneration()
-        resetEngineForCurrentMode()
-        _activeConversation.value = null
-        _messages.value = emptyList()
-        _lastUsedMemories.value = emptyList()
-    }
-
-    fun selectConversation(session: ConversationSession) {
-        if (_isGenerating.value) stopGeneration()
-        resetEngineForCurrentMode()
-        _activeConversation.value = session
-        _lastUsedMemories.value = emptyList()
-        viewModelScope.launch {
-            _messages.value = repository.getMessages(session.id)
-        }
-    }
-
-    fun renameConversation(session: ConversationSession, newTitle: String) {
-        viewModelScope.launch {
-            repository.updateConversationTitle(session.id, newTitle)
-            loadConversations()
-            if (_activeConversation.value?.id == session.id) {
-                _activeConversation.value = _activeConversation.value?.copy(title = newTitle)
-            }
-        }
-    }
-
-    fun deleteConversation(session: ConversationSession) {
-        viewModelScope.launch {
-            repository.deleteConversation(session.id)
-            if (_activeConversation.value?.id == session.id) {
-                newChat()
-            }
-            loadConversations()
-        }
-    }
-
-    fun togglePin(session: ConversationSession) {
-        viewModelScope.launch {
-            repository.togglePinConversation(session.id, !session.isPinned)
-            loadConversations()
-        }
-    }
-
-    fun searchConversations(query: String) {
-        _searchQuery.value = query
-        viewModelScope.launch {
-            _conversations.value = repository.searchConversations(query)
-        }
-    }
-
-    fun clearChat() {
-        val currentSession = _activeConversation.value
-        if (currentSession != null) {
-            deleteConversation(currentSession)
-        } else {
-            newChat()
-        }
-    }
-
-    // ── Model Importing ───────────────────────────────────────────────────────
-    fun importModel(uri: Uri) {
-        viewModelScope.launch {
-            _importProgress.value = 0f
-            val result = modelRepository.importModelFromUri(uri) { prog ->
-                _importProgress.value = prog
-            }
-            _importProgress.value = null
-
-            if (result.isSuccess) {
-                // BUG-027 FIX: getOrNull()!! is contradictory — getOrNull avoids throws
-                // but !! immediately re-introduces NPE. Use getOrElse instead.
-                val file = result.getOrElse { return@launch }
-                initializeEngine(explicitModelFile = file)
-            }
-        }
-    }
-
-    // ── Settings Updates ──────────────────────────────────────────────────────
-    fun setPerformanceMode(mode: PerformanceMode) {
-        _performanceMode.value = mode
-        prefs.performanceMode = mode
-    }
-
-    fun setThreadCount(count: Int) {
-        val clamped = count.coerceIn(GenerationConfig.MIN_THREAD_COUNT, GenerationConfig.MAX_THREAD_COUNT)
-        _threadCount.value = clamped
-        prefs.threadCount = clamped
-        validateCurrentConfig().also { lastValidationResult = it }
-    }
-
-    fun setTemperature(temp: Float) {
-        val clamped = temp.coerceIn(GenerationConfig.MIN_TEMPERATURE, GenerationConfig.MAX_TEMPERATURE)
-        _temperature.value = clamped
-        prefs.temperature = clamped
-        validateCurrentConfig().also { lastValidationResult = it }
-    }
-
-    fun setTopP(p: Float) {
-        val clamped = p.coerceIn(GenerationConfig.MIN_TOP_P, GenerationConfig.MAX_TOP_P)
-        _topP.value = clamped
-        prefs.topP = clamped
-        validateCurrentConfig().also { lastValidationResult = it }
-    }
-
-    fun setMaxTokens(tokens: Int) {
-        val clamped = tokens.coerceIn(GenerationConfig.MIN_MAX_TOKENS, GenerationConfig.MAX_MAX_TOKENS)
-        _maxTokens.value = clamped
-        prefs.maxOutputTokens = clamped
-        validateCurrentConfig().also { lastValidationResult = it }
-    }
-
-    fun setActivePromptProfile(profile: PromptProfile) {
-        setActiveProfile(profile.id)
-    }
-
-    fun updatePromptProfiles(profiles: List<PromptProfile>) {
-        profiles.forEach { prefs.addOrUpdateProfile(it) }
-        _profiles.value = prefs.promptProfiles
-        validateCurrentConfig().also { lastValidationResult = it }
+        validateCurrentConfig()
+        return null
     }
 
     fun saveActiveProfile(profile: PromptProfile): String? = savePromptProfile(profile)
 
+    fun deletePromptProfile(profileId: String) {
+        deps.prefs.removeProfile(profileId)
+        val updatedList = deps.prefs.promptProfiles
+        synchronized(stateLock) {
+            profilesValue = updatedList
+            if (activeProfileValue.id == profileId) {
+                val fallback = updatedList.firstOrNull() ?: PromptProfile.standardDefault()
+                activeProfileValue = fallback
+                deps.prefs.setActivePromptProfile(fallback.id)
+                systemPromptValue = fallback.effectiveSystemPrompt.ifBlank { fallback.instructionText }
+                deps.prefs.systemPrompt = systemPromptValue
+            }
+        }
+        validateCurrentConfig()
+    }
+
+    fun resetPromptProfile(profileId: String) {
+        deps.prefs.resetProfileToDefault(profileId)
+        val updatedList = deps.prefs.promptProfiles
+        synchronized(stateLock) {
+            profilesValue = updatedList
+            updatedList.firstOrNull { it.id == profileId }?.let { restored ->
+                if (restored.id == activeProfileValue.id) {
+                    activeProfileValue = restored
+                    systemPromptValue = restored.effectiveSystemPrompt
+                    deps.prefs.systemPrompt = restored.effectiveSystemPrompt
+                }
+            }
+        }
+        validateCurrentConfig()
+    }
+
+    fun setPerformanceMode(mode: PerformanceMode) {
+        deps.prefs.performanceMode = mode
+        synchronized(stateLock) { performanceModeValue = mode }
+        validateCurrentConfig()
+    }
+
+    fun setThreadCount(count: Int) {
+        val clamped = count.coerceIn(GenerationConfig.MIN_THREAD_COUNT, GenerationConfig.MAX_THREAD_COUNT)
+        deps.prefs.threadCount = clamped
+        synchronized(stateLock) { threadCountValue = clamped }
+        validateCurrentConfig()
+    }
+
+    fun setTemperature(temp: Float) {
+        val clamped = temp.coerceIn(GenerationConfig.MIN_TEMPERATURE, GenerationConfig.MAX_TEMPERATURE)
+        deps.prefs.temperature = clamped
+        synchronized(stateLock) { temperatureValue = clamped }
+        validateCurrentConfig()
+    }
+
+    fun setTopP(p: Float) {
+        val clamped = p.coerceIn(GenerationConfig.MIN_TOP_P, GenerationConfig.MAX_TOP_P)
+        deps.prefs.topP = clamped
+        synchronized(stateLock) { topPValue = clamped }
+        validateCurrentConfig()
+    }
+
+    fun setRepetitionPenalty(value: Float) {
+        val clamped = value.coerceIn(
+            GenerationConfig.MIN_REPETITION_PENALTY,
+            GenerationConfig.MAX_REPETITION_PENALTY,
+        )
+        deps.prefs.repetitionPenalty = clamped
+        synchronized(stateLock) { repetitionPenaltyValue = clamped }
+        validateCurrentConfig()
+    }
+
+    fun setContextLength(value: Int) {
+        val clamped = value.coerceIn(
+            GenerationConfig.MIN_CONTEXT_LENGTH,
+            GenerationConfig.MAX_CONTEXT_LENGTH,
+        )
+        deps.prefs.contextLength = clamped
+        synchronized(stateLock) { contextLengthValue = clamped }
+        validateCurrentConfig()
+    }
+
+    fun setMaxTokens(tokens: Int) {
+        val clamped = tokens.coerceIn(GenerationConfig.MIN_MAX_TOKENS, GenerationConfig.MAX_MAX_TOKENS)
+        deps.prefs.maxOutputTokens = clamped
+        synchronized(stateLock) { maxTokensValue = clamped }
+        validateCurrentConfig()
+    }
+
     fun setSystemPrompt(prompt: String) {
-        val clean = com.example.on_device_qwen.model.sanitizeSystemPrompt(prompt)
-        _systemPrompt.value = clean
-        prefs.systemPrompt = clean
-        // Keep the active profile in sync so the editor visibly changes inference.
-        val current = _activeProfile.value
-        val updated = current.copy(instructionText = clean, effectiveSystemPrompt = clean)
-        prefs.addOrUpdateProfile(updated)
-        _profiles.value = prefs.promptProfiles
-        _activeProfile.value = updated
-        validateCurrentConfig().also { lastValidationResult = it }
+        val clean = sanitizeSystemPrompt(prompt)
+        deps.prefs.systemPrompt = clean
+        val updated = synchronized(stateLock) {
+            activeProfileValue.copy(instructionText = clean, effectiveSystemPrompt = clean)
+        }
+        deps.prefs.addOrUpdateProfile(updated)
+        val refreshed = deps.prefs.promptProfiles
+        synchronized(stateLock) {
+            systemPromptValue = clean
+            activeProfileValue = updated
+            profilesValue = refreshed
+        }
+        validateCurrentConfig()
     }
 
     fun setThemeMode(mode: ThemeMode) {
+        deps.prefs.themeMode = mode
+        synchronized(stateLock) { themeModeValue = mode }
         _themeMode.value = mode
-        prefs.themeMode = mode
+        publishUiStates()
     }
 
     fun setHapticsEnabled(enabled: Boolean) {
+        deps.prefs.hapticsEnabled = enabled
+        synchronized(stateLock) { hapticsEnabledValue = enabled }
         _hapticsEnabled.value = enabled
-        prefs.hapticsEnabled = enabled
+        publishUiStates()
     }
 
-    fun regenerationConfig(): GenerationConfig {
-        // Regeneration must reuse the same chat mode / prompt profile as the original turn.
-        return currentGenerationConfig()
-    }
+    fun regenerationConfig(): GenerationConfig = currentGenerationConfig()
 
-    private fun saveUriToCache(uri: Uri): File? {
-        return try {
-            val app = getApplication<Application>()
-            val targetFile = File(app.cacheDir, "vlm_input_${System.currentTimeMillis()}.jpg")
-            app.contentResolver.openInputStream(uri)?.use { input ->
-                targetFile.outputStream().use { output ->
-                    input.copyTo(output)
-                }
-            }
-            targetFile
-        } catch (_: Exception) {
-            null
-        }
-    }
+    // ── TTS & Suggestions ─────────────────────────────────────────────────────
 
-    private data class ParsedResponse(val think: String?, val answer: String)
+    fun speak(text: String) = deps.speakFn(text)
 
-    private fun parseReasoningTags(raw: String): ParsedResponse {
-        val openTag = "<think>"
-        val closeTag = "</think>"
-        val openIdx = raw.indexOf(openTag)
-        if (openIdx == -1) return ParsedResponse(null, raw)
-
-        val afterOpen = raw.substring(openIdx + openTag.length)
-        val closeIdx = afterOpen.indexOf(closeTag)
-        return if (closeIdx == -1) {
-            ParsedResponse(afterOpen.trim(), "")
-        } else {
-            val think = afterOpen.substring(0, closeIdx).trim()
-            val answer = afterOpen.substring(closeIdx + closeTag.length).trimStart('\n', '\r', ' ')
-            ParsedResponse(think.ifEmpty { null }, answer)
-        }
-    }
-
-    fun speak(text: String) {
-        ttsManager.speak(text)
-    }
-
-    fun stopSpeaking() {
-        ttsManager.stop()
-    }
+    fun stopSpeaking() = deps.stopSpeakFn()
 
     fun getFollowUpSuggestions(lastAssistantMessage: String?): List<String> {
         if (lastAssistantMessage.isNullOrBlank()) return emptyList()
         val lower = lastAssistantMessage.lowercase()
         val suggestions = mutableListOf<String>()
 
-        if (lower.contains("```") || lower.contains("fun ") || lower.contains("def ") || lower.contains("class ")) {
-            suggestions.add("Explain how this code works")
-            suggestions.add("Write unit tests for this")
-            suggestions.add("Can you optimize this implementation?")
-        } else if (lower.contains("diagram") || lower.contains("graph") || lower.contains("flowchart") || lower.contains("architecture")) {
-            suggestions.add("Show this as a Mermaid flowchart")
-            suggestions.add("Explain the system components step-by-step")
-        } else if (lower.contains("table") || lower.contains("|")) {
-            suggestions.add("Add more details to the comparison table")
-            suggestions.add("What are the key trade-offs?")
-        } else {
-            suggestions.add("Explain in simpler terms")
-            suggestions.add("Give a practical real-world example")
-            suggestions.add("Summarize into 3 key takeaways")
+        when {
+            lower.contains("```") || lower.contains("fun ") || lower.contains("def ") || lower.contains("class ") -> {
+                suggestions.add("Explain how this code works")
+                suggestions.add("Write unit tests for this")
+                suggestions.add("Optimize this implementation")
+            }
+            lower.contains("diagram") || lower.contains("graph") || lower.contains("flowchart") || lower.contains("architecture") -> {
+                suggestions.add("Show as a Mermaid flowchart")
+                suggestions.add("Break down the components")
+            }
+            lower.contains("table") || lower.contains("|") -> {
+                suggestions.add("Add more comparison criteria")
+                suggestions.add("Summarize key trade-offs")
+            }
+            else -> {
+                suggestions.add("Explain in simpler terms")
+                suggestions.add("Give a practical example")
+                suggestions.add("Summarize key takeaways")
+            }
         }
         return suggestions.take(3)
     }
 
+    // ── Helpers & Cleanup ─────────────────────────────────────────────────────
+
+    private suspend fun resetEngineForCurrentMode(history: List<ChatMessage>) {
+        val engine = activeEngine ?: return
+        val prompt = currentGenerationConfig().systemPrompt
+        if (engine is com.example.on_device_qwen.domain.engine.LiteRTInferenceEngine) {
+            engine.resetConversationWithSystemPrompt(prompt)
+        } else {
+            engine.resetSession(prompt, history)
+        }
+    }
+
+    private data class ParsedResponse(val think: String?, val answer: String)
+
+    private fun parseReasoningTags(raw: String, explicitThink: String? = null): ParsedResponse {
+        val openTag = "<think>"
+        val closeTag = "</think>"
+        val openIdx = raw.indexOf(openTag)
+        if (openIdx == -1) {
+            return ParsedResponse(explicitThink?.trim()?.ifEmpty { null }, raw)
+        }
+
+        val afterOpen = raw.substring(openIdx + openTag.length)
+        val closeIdx = afterOpen.indexOf(closeTag)
+        return if (closeIdx == -1) {
+            val combinedThink = afterOpen.trim().ifEmpty { explicitThink?.trim().orEmpty() }
+            ParsedResponse(combinedThink.ifEmpty { null }, "")
+        } else {
+            val tagThink = afterOpen.substring(0, closeIdx).trim()
+            val answer = afterOpen.substring(closeIdx + closeTag.length).trimStart('\n', '\r', ' ')
+            val combinedThink = tagThink.ifEmpty { explicitThink?.trim().orEmpty() }
+            ParsedResponse(combinedThink.ifEmpty { null }, answer)
+        }
+    }
+
+    private fun canonicalPathOf(file: File): String =
+        try { file.canonicalPath } catch (_: Exception) { file.absolutePath }
+
+    private fun publishUiStates() {
+        _chatUiState.value = buildChatUiState()
+        _modelHubUiState.value = buildModelHubUiState()
+        _settingsUiState.value = buildSettingsUiState()
+        _memoryUiState.value = buildMemoryUiState()
+        _navigationUiState.value = buildNavigationUiState()
+    }
+
+    private fun buildChatUiState(): ChatScreenUiState = synchronized(stateLock) {
+        val showGuide = onboardingExplicitlyShown ||
+            (!onboardingCompletedValue && engineStateValue !is EngineState.Ready)
+        ChatScreenUiState(
+            engineState = engineStateValue,
+            modelTitle = modelTitleValue,
+            activeModelMetadata = activeModelMetadataValue,
+            executionBackendInfo = executionBackendInfoValue,
+            engineCapabilities = engineCapabilitiesValue,
+            messages = messagesValue,
+            isGenerating = isGeneratingValue,
+            isVisionSupported = isVisionSupportedValue,
+            visionUnsupportedReason = visionUnsupportedReasonValue,
+            isSpeaking = isSpeakingValue,
+            chatMode = chatModeValue,
+            activeProfile = activeProfileValue,
+            lastUsedMemories = lastUsedMemoriesValue,
+            validationBanner = validationBannerValue,
+            backendFallbackBanner = backendFallbackBannerValue,
+            transientErrorBanner = transientErrorBannerValue,
+            activeConversationId = activeConversationValue?.id,
+            activeConversationTitle = activeConversationValue?.title,
+            showOnboarding = showGuide,
+            onboardingCompleted = onboardingCompletedValue,
+            hardwareInfo = hardwareInfoValue,
+        )
+    }
+
+    private fun buildModelHubUiState(): ModelHubUiState = synchronized(stateLock) {
+        val hw = hardwareInfoValue
+        ModelHubUiState(
+            discoveredModels = discoveredModelsValue,
+            activeModel = activeModelMetadataValue,
+            availRamMb = hw.availRamMb,
+            totalRamMb = hw.totalRamMb,
+            importState = importStateValue,
+            importError = importErrorValue,
+            isScanning = isScanningValue,
+            currentBackend = currentBackendValue,
+            executionBackendInfo = executionBackendInfoValue,
+            catalogRecommendations = deps.modelHub.recommendCatalogModels(hw.totalRamMb, hw.availRamMb),
+        )
+    }
+
+    private fun buildSettingsUiState(): SettingsUiState = synchronized(stateLock) {
+        val engineType = activeModelMetadataValue?.engineType
+            ?: when (currentBackendValue) {
+                BackendType.CPU -> EngineType.LLAMA_CPP
+                BackendType.GPU, BackendType.NPU -> EngineType.LITERT
+            }
+        val config = GenerationConfig(
+            temperature = temperatureValue,
+            topP = topPValue,
+            repetitionPenalty = repetitionPenaltyValue,
+            maxOutputTokens = maxTokensValue,
+            contextLength = contextLengthValue,
+            systemPrompt = systemPromptValue,
+            threadCount = threadCountValue,
+            backend = currentBackendValue,
+            unrestrictedMode = chatModeValue,
+            activePromptProfileId = activeProfileValue.id,
+        )
+        val runtimeNotes = PromptValidation.auditRuntimeSupport(config).map { it.message }
+        SettingsUiState(
+            performanceMode = performanceModeValue,
+            backendType = currentBackendValue,
+            activeEngineType = engineType,
+            executionBackendInfo = executionBackendInfoValue,
+            engineCapabilities = engineCapabilitiesValue,
+            threadCount = threadCountValue,
+            temperature = temperatureValue,
+            topP = topPValue,
+            repetitionPenalty = repetitionPenaltyValue,
+            maxTokens = maxTokensValue,
+            contextLength = contextLengthValue,
+            systemPrompt = systemPromptValue,
+            chatMode = chatModeValue,
+            activeProfile = activeProfileValue,
+            profiles = profilesValue,
+            themeMode = themeModeValue,
+            hapticsEnabled = hapticsEnabledValue,
+            persistentMemoryEnabled = persistentMemoryEnabledValue,
+            validationErrors = validationErrorsValue.map { it.message },
+            runtimeSupportNotices = runtimeNotes,
+            supportedParameters = GenerationConfig.runtimeParameterSupport(engineType),
+            hardwareInfo = hardwareInfoValue,
+        )
+    }
+
+    private fun buildMemoryUiState(): MemoryUiState = synchronized(stateLock) {
+        MemoryUiState(
+            memories = displayedMemoriesValue,
+            totalMemoryCount = allMemoriesMasterValue.size,
+            searchQuery = memorySearchQuery,
+            isMemoryEnabled = persistentMemoryEnabledValue,
+            selectedCategory = selectedMemoryCategory,
+        )
+    }
+
+    private fun buildNavigationUiState(): NavigationUiState = synchronized(stateLock) {
+        val hw = hardwareInfoValue
+        NavigationUiState(
+            conversations = conversationsValue,
+            activeConversationId = activeConversationValue?.id,
+            searchQuery = conversationSearchQuery,
+            batteryPercent = hw.batteryPercent,
+            batteryTemp = hw.batteryTempCelsius,
+            availableRamMb = hw.availRamMb,
+        )
+    }
+
     override fun onCleared() {
         super.onCleared()
-        thermalManager.cleanup()
-        ttsManager.shutdown()
-        // BUG-001 FIX: viewModelScope is cancelled by super.onCleared() before any
-        // new coroutine can execute inside it. Use runBlocking to synchronously unload
-        // native engine handles, preventing JNI memory / file-lock leaks.
+        deps.cleanupThermalFn()
+        deps.shutdownTtsFn()
         try {
-            kotlinx.coroutines.runBlocking(kotlinx.coroutines.Dispatchers.IO) {
-                activeEngine?.unloadModel()
+            runBlocking(deps.ioDispatcher) {
+                generationJob?.cancelAndJoin()
+                engineMutex.withLock {
+                    activeEngine?.unloadModel()
+                    activeEngine = null
+                }
             }
-        } catch (_: Exception) {}
+        } catch (_: Exception) {
+        }
     }
 }

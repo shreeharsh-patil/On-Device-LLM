@@ -1,18 +1,13 @@
 package com.example.on_device_qwen.domain.memory
 
-import android.content.Context
-import com.example.on_device_qwen.data.preferences.AppPreferences
-import com.example.on_device_qwen.data.repository.ConversationRepository
 import com.example.on_device_qwen.model.ConversationSummary
+import com.example.on_device_qwen.model.IMemoryPreferences
+import com.example.on_device_qwen.model.IMemoryRepository
 import com.example.on_device_qwen.model.MemoryCategory
 import com.example.on_device_qwen.model.MemoryItem
 import com.example.on_device_qwen.model.RetrievedMemoryContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.util.UUID
-
-import com.example.on_device_qwen.model.IMemoryPreferences
-import com.example.on_device_qwen.model.IMemoryRepository
 
 /**
  * Local-first, offline memory consolidation and extraction manager.
@@ -24,36 +19,123 @@ class MemoryManager(
 ) {
     companion object {
         private val SENSITIVE_PATTERN = Regex(
-            "(?i)\\b(password|passwd|secret|apikey|api_key|token|bearer\\s+[a-zA-Z0-9_\\-\\.]+|ghp_[a-zA-Z0-9]+|sk-[a-zA-Z0-9]+)\\b"
+            listOf(
+                // Credentials & common API secrets
+                "(?i)\\b(?:password|passwd|secret|apikey|api_key|token)\\b",
+                "(?i)\\bbearer\\s+[A-Za-z0-9\\-._~+/]+=*",
+                "\\b(?:ghp|gho)_[A-Za-z0-9]+",
+                "\\bgithub_pat_[A-Za-z0-9_]+",
+                "\\bsk-[A-Za-z0-9_\\-]{8,}",
+                "\\bAIza[0-9A-Za-z_\\-]{20,}",
+                "\\bAKIA[0-9A-Z]{16}\\b",
+                // JWTs
+                "\\beyJ[A-Za-z0-9_\\-]{5,}\\.[A-Za-z0-9_\\-]{5,}\\.[A-Za-z0-9_\\-]{5,}\\b",
+                // PEM private keys
+                "-----BEGIN\\s+(?:[A-Z0-9]+\\s+)*PRIVATE KEY-----",
+                // Emails
+                "[A-Za-z0-9._%+\\-]+@[A-Za-z0-9.\\-]+\\.[A-Za-z]{2,}",
+                // US SSNs
+                "\\b\\d{3}-\\d{2}-\\d{4}\\b",
+                // Credit card patterns (16-digit grouped or 13-16 digit Visa/MC/Amex)
+                "(?<!\\d)(?:\\d{4}[-\\s]?){3}\\d{4}(?!\\d)",
+                "\\b(?:3[47]\\d{13}|4\\d{12}(?:\\d{3})?|5[1-5]\\d{14})\\b",
+                // Phone numbers (US formatted & international +country formats)
+                "(?<!\\d)(?:\\+\\d{1,3}[\\s.\\-]?)?(?:\\(\\d{3}\\)\\s*|\\d{3}[\\s.\\-])\\d{3}[\\s.\\-]\\d{4}(?!\\d)",
+                "(?<!\\d)\\+\\d{1,3}[\\s.\\-]?\\d{7,12}(?!\\d)"
+            ).joinToString("|")
         )
+
+        fun containsSensitiveInfo(text: String): Boolean = SENSITIVE_PATTERN.containsMatchIn(text)
+
+        fun redactSensitiveInfo(text: String): String = SENSITIVE_PATTERN.replace(text, "[REDACTED]")
+
+        fun sanitizeContent(content: String): String =
+            MemoryItem(category = MemoryCategory.EPISODIC, content = content).sanitizedContent()
     }
 
     /**
      * Retrieve relevant user, project, and episodic memories for the incoming query,
-     * respecting the user's memory enablement preference.
+     * respecting the user's memory enablement preference and [maxTokens] budget without
+     * truncating any individual entry mid-string.
      */
     suspend fun retrieveMemoryContext(
         query: String,
         conversationId: String,
         maxTokens: Int = 512
     ): RetrievedMemoryContext = withContext(Dispatchers.IO) {
-        if (!prefs.persistentMemoryEnabled) {
+        if (!prefs.persistentMemoryEnabled || maxTokens <= 0) {
             return@withContext RetrievedMemoryContext()
         }
 
-        val limit = prefs.maxMemoryItems
-        val relevantMemories = repository.findRelevantMemories(query, limit = limit)
-        val summary = repository.getConversationSummary(conversationId)
+        val limit = prefs.maxMemoryItems.coerceAtLeast(0)
+        val candidates = if (limit > 0) {
+            repository.findRelevantMemories(query, limit = limit)
+        } else {
+            emptyList()
+        }
+        val rawSummary = repository.getConversationSummary(conversationId)
 
-        // Estimate token cost (~4 characters per token heuristic)
-        val textLength = relevantMemories.sumOf { it.content.length } + (summary?.summaryText?.length ?: 0)
-        val tokenEstimate = (textLength / 4) + 16
+        val includedMemories = mutableListOf<MemoryItem>()
+        var usedTokens = 0
+
+        for (memory in candidates) {
+            val cleanText = memory.sanitizedContent()
+            if (cleanText.isBlank() || containsSensitiveInfo(cleanText)) continue
+            val entryTokens = estimateTokens(cleanText)
+            if (usedTokens + entryTokens <= maxTokens) {
+                includedMemories.add(memory.copy(content = cleanText))
+                usedTokens += entryTokens
+            }
+        }
+
+        val includedSummary: ConversationSummary? = rawSummary?.let { sum ->
+            val cleanSummary = sanitizeContent(sum.summaryText)
+            if (cleanSummary.isBlank() || containsSensitiveInfo(cleanSummary)) {
+                null
+            } else {
+                val summaryTokens = estimateTokens(cleanSummary)
+                if (usedTokens + summaryTokens <= maxTokens) {
+                    usedTokens += summaryTokens
+                    sum.copy(summaryText = cleanSummary)
+                } else {
+                    null
+                }
+            }
+        }
 
         RetrievedMemoryContext(
-            memories = relevantMemories,
-            summary = summary,
-            tokenEstimate = tokenEstimate
+            memories = includedMemories,
+            summary = includedSummary,
+            tokenEstimate = usedTokens
         )
+    }
+
+    /**
+     * Safely validates and saves a memory item, blocking PII/secrets and stripping template tokens.
+     */
+    suspend fun saveMemory(item: MemoryItem): Long = withContext(Dispatchers.IO) {
+        val cleanContent = item.sanitizedContent()
+        if (cleanContent.isBlank() || containsSensitiveInfo(cleanContent)) {
+            return@withContext -1L
+        }
+        val keywords = item.keywords.ifBlank { extractKeywords(cleanContent).joinToString(" ") }
+        repository.saveMemory(item.copy(content = cleanContent, keywords = keywords))
+    }
+
+    /**
+     * Safely validates and updates an existing memory item, syncing keywords and blocking PII/secrets.
+     */
+    suspend fun updateMemory(
+        id: String,
+        newContent: String,
+        category: MemoryCategory? = null
+    ): Int = withContext(Dispatchers.IO) {
+        val cleanContent = sanitizeContent(newContent)
+        if (cleanContent.isBlank() || containsSensitiveInfo(cleanContent)) {
+            return@withContext 0
+        }
+        val updatedKeywords = extractKeywords(cleanContent).joinToString(" ")
+        repository.updateMemoryWithKeywords(id, cleanContent, updatedKeywords, category)
     }
 
     /**
@@ -68,13 +150,15 @@ class MemoryManager(
         if (!prefs.persistentMemoryEnabled) return@withContext
         if (containsSensitiveInfo(userText) || containsSensitiveInfo(assistantText)) return@withContext
 
+        val cleanUser = sanitizeContent(userText)
+        val cleanAssistant = sanitizeContent(assistantText)
         val extracted = mutableListOf<MemoryItem>()
 
         // 1. User Preference & Persona Extraction
-        extractUserPreferences(userText, conversationId)?.let { extracted.add(it) }
+        extractUserPreferences(cleanUser, conversationId)?.let { extracted.add(it) }
 
         // 2. Project Architecture & Technical Decisions
-        extractProjectDecisions(userText, assistantText, conversationId)?.let { extracted.add(it) }
+        extractProjectDecisions(cleanUser, cleanAssistant, conversationId)?.let { extracted.add(it) }
 
         // 3. Persist and deduplicate
         for (item in extracted) {
@@ -84,11 +168,15 @@ class MemoryManager(
 
     /**
      * Deduplicates and consolidates newly extracted memories into the repository.
-     * Updates existing memories if they pertain to the same entity.
+     * Updates existing memories (and their keywords) if they pertain to the same entity.
      */
     suspend fun consolidateMemoryItem(newItem: MemoryItem) = withContext(Dispatchers.IO) {
+        val cleanContent = newItem.sanitizedContent()
+        if (cleanContent.isBlank() || containsSensitiveInfo(cleanContent)) return@withContext
+
         val allMemories = repository.getAllMemories()
-        val newKeywords = extractKeywords(newItem.content)
+        val newKeywords = extractKeywords(cleanContent)
+        val keywordsString = newKeywords.joinToString(" ")
 
         // Find existing memory with matching high-similarity keywords in the same category
         val existing = allMemories.firstOrNull { existingItem ->
@@ -97,13 +185,17 @@ class MemoryManager(
         }
 
         if (existing != null) {
-            // Update the existing memory with newer details and bump recency
-            repository.updateMemory(existing.id, newItem.content, newItem.category)
+            // Update existing memory content and keywords so relevance scoring stays accurate
+            repository.updateMemoryWithKeywords(existing.id, cleanContent, keywordsString, newItem.category)
         } else {
             // Persist as a new distinct memory item
-            val itemToSave = newItem.copy(keywords = newKeywords.joinToString(" "))
+            val itemToSave = newItem.copy(content = cleanContent, keywords = keywordsString)
             repository.saveMemory(itemToSave)
         }
+    }
+
+    private fun estimateTokens(text: String): Int {
+        return maxOf(1, (text.length + 3) / 4)
     }
 
     private fun extractUserPreferences(userText: String, conversationId: String): MemoryItem? {
@@ -180,9 +272,5 @@ class MemoryManager(
         val intersection = setA.intersect(setB)
         val minSize = minOf(setA.size, setB.size)
         return intersection.size >= 2 || (minSize <= 2 && intersection.isNotEmpty())
-    }
-
-    private fun containsSensitiveInfo(text: String): Boolean {
-        return SENSITIVE_PATTERN.containsMatchIn(text)
     }
 }

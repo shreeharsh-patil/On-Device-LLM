@@ -32,6 +32,7 @@ import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material3.*
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -58,44 +59,44 @@ import kotlinx.coroutines.launch
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatScreen(viewModel: ChatViewModel) {
-    val engineState by viewModel.engineState.collectAsState()
-    val messages by viewModel.messages.collectAsState()
-    val isGenerating by viewModel.isGenerating.collectAsState()
-    val isVisionModel by viewModel.isVisionModel.collectAsState()
-    val isSpeaking by viewModel.isSpeaking.collectAsState()
-    val modelTitle by viewModel.modelTitle.collectAsState()
-    val discoveredModels by viewModel.discoveredModels.collectAsState()
-    val currentBackend by viewModel.currentBackend.collectAsState()
-    val performanceMode by viewModel.performanceMode.collectAsState()
-    val chatMode by viewModel.chatMode.collectAsState()
-    val validationBanner by viewModel.validationBanner.collectAsState()
-    val activeProfile by viewModel.activeProfile.collectAsState()
-    val profiles by viewModel.profiles.collectAsState()
-    val conversations by viewModel.conversations.collectAsState()
-    val activeConversation by viewModel.activeConversation.collectAsState()
-    val searchQuery by viewModel.searchQuery.collectAsState()
+    val engineState by viewModel.engineState.collectAsStateWithLifecycle()
+    val messages by viewModel.messages.collectAsStateWithLifecycle()
+    val isGenerating by viewModel.isGenerating.collectAsStateWithLifecycle()
+    val isVisionModel by viewModel.isVisionModel.collectAsStateWithLifecycle()
+    val isSpeaking by viewModel.isSpeaking.collectAsStateWithLifecycle()
+    val modelTitle by viewModel.modelTitle.collectAsStateWithLifecycle()
+    val discoveredModels by viewModel.discoveredModels.collectAsStateWithLifecycle()
+    val currentBackend by viewModel.currentBackend.collectAsStateWithLifecycle()
+    val performanceMode by viewModel.performanceMode.collectAsStateWithLifecycle()
+    val chatMode by viewModel.chatMode.collectAsStateWithLifecycle()
+    val validationBanner by viewModel.validationBanner.collectAsStateWithLifecycle()
+    val activeProfile by viewModel.activeProfile.collectAsStateWithLifecycle()
+    val profiles by viewModel.profiles.collectAsStateWithLifecycle()
+    val conversations by viewModel.conversations.collectAsStateWithLifecycle()
+    val activeConversation by viewModel.activeConversation.collectAsStateWithLifecycle()
+    val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
 
     // Persistent Memory
-    val persistentMemoryEnabled by viewModel.persistentMemoryEnabled.collectAsState()
-    val allMemories by viewModel.allMemories.collectAsState()
-    val lastUsedMemories by viewModel.lastUsedMemories.collectAsState()
+    val persistentMemoryEnabled by viewModel.persistentMemoryEnabled.collectAsStateWithLifecycle()
+    val allMemories by viewModel.allMemories.collectAsStateWithLifecycle()
+    val lastUsedMemories by viewModel.lastUsedMemories.collectAsStateWithLifecycle()
 
     // Hardware Telemetry
-    val thermalState by viewModel.thermalState.collectAsState()
-    val batteryTemp by viewModel.batteryTemp.collectAsState()
-    val batteryPercent by viewModel.batteryPercent.collectAsState()
-    val isCharging by viewModel.isCharging.collectAsState()
-    val availRamMb by viewModel.availRamMb.collectAsState()
-    val totalRamMb by viewModel.totalRamMb.collectAsState()
-    val importProgress by viewModel.importProgress.collectAsState()
+    val thermalState by viewModel.thermalState.collectAsStateWithLifecycle()
+    val batteryTemp by viewModel.batteryTemp.collectAsStateWithLifecycle()
+    val batteryPercent by viewModel.batteryPercent.collectAsStateWithLifecycle()
+    val isCharging by viewModel.isCharging.collectAsStateWithLifecycle()
+    val availRamMb by viewModel.availRamMb.collectAsStateWithLifecycle()
+    val totalRamMb by viewModel.totalRamMb.collectAsStateWithLifecycle()
+    val importProgress by viewModel.importProgress.collectAsStateWithLifecycle()
 
     // Preferences
-    val temperature by viewModel.temperature.collectAsState()
-    val topP by viewModel.topP.collectAsState()
-    val maxTokens by viewModel.maxTokens.collectAsState()
-    val systemPrompt by viewModel.systemPrompt.collectAsState()
-    val threadCount by viewModel.threadCount.collectAsState()
-    val themeMode by viewModel.themeMode.collectAsState()
+    val temperature by viewModel.temperature.collectAsStateWithLifecycle()
+    val topP by viewModel.topP.collectAsStateWithLifecycle()
+    val maxTokens by viewModel.maxTokens.collectAsStateWithLifecycle()
+    val systemPrompt by viewModel.systemPrompt.collectAsStateWithLifecycle()
+    val threadCount by viewModel.threadCount.collectAsStateWithLifecycle()
+    val themeMode by viewModel.themeMode.collectAsStateWithLifecycle()
 
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val coroutineScope = rememberCoroutineScope()
@@ -372,7 +373,7 @@ fun ChatScreen(viewModel: ChatViewModel) {
     }
 }
 
-// ─── ChatGPT Top App Bar ───────────────────────────────────────────────────
+// ─── Adaptive, purposeful app navigation ──────────────────────────────────
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -386,61 +387,73 @@ private fun ChatTopBar(
     onOpenSettings: () -> Unit,
     onNewChat: () -> Unit
 ) {
+    val active = engineState is EngineState.Ready
+    val status = when (engineState) {
+        is EngineState.Ready -> "READY"
+        is EngineState.Loading -> "LOADING"
+        is EngineState.Error -> "NEEDS SETUP"
+        else -> "LOCAL AI"
+    }
     TopAppBar(
         title = {
-            Box(
-                modifier = Modifier.fillMaxWidth(),
-                contentAlignment = Alignment.Center
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .clickable(onClick = onOpenModelSelector)
+                    .padding(start = 2.dp, top = 4.dp, bottom = 4.dp)
             ) {
-                // Centered pill model selector like ChatGPT
-                Surface(
-                    shape = RoundedCornerShape(20.dp),
-                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(20.dp))
-                        .clickable { onOpenModelSelector() }
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
-                    ) {
-                        Text(
-                            text = modelTitle,
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.SemiBold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        Spacer(Modifier.width(4.dp))
-                        Icon(
-                            imageVector = Icons.Default.KeyboardArrowDown,
-                            contentDescription = "Switch model",
-                            modifier = Modifier.size(16.dp),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(7.dp)
+                            .background(
+                                if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
+                                CircleShape
+                            )
+                    )
+                    Spacer(Modifier.width(7.dp))
+                    Text(
+                        text = status + " · " + if (chatMode == UnrestrictedMode.UNRESTRICTED) "UNRESTRICTED" else "STANDARD",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = modelTitle.ifBlank { "Choose a model" },
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Icon(
+                        Icons.Default.KeyboardArrowDown,
+                        contentDescription = "Select local AI model",
+                        modifier = Modifier.size(18.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
         },
         navigationIcon = {
             IconButton(onClick = onOpenDrawer) {
-                Icon(Icons.Default.Menu, contentDescription = "Sidebar")
+                Icon(Icons.Default.Menu, contentDescription = "Open conversation navigation")
             }
         },
         actions = {
-            ActiveModeChip(
-                chatMode = chatMode,
-                profileName = activeProfileName,
-                onClick = onOpenSettings
-            )
+            IconButton(onClick = onOpenSettings) {
+                Icon(Icons.Default.Tune, contentDescription = "Open settings and prompt profile")
+            }
             IconButton(onClick = onNewChat) {
-                Icon(Icons.Outlined.Edit, contentDescription = "New chat")
+                Icon(Icons.Outlined.Edit, contentDescription = "Start new chat")
             }
         },
-        colors = TopAppBarDefaults.topAppBarColors(
-            containerColor = MaterialTheme.colorScheme.background
-        )
+        colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background)
     )
 }
 
@@ -509,7 +522,7 @@ private fun ActiveModeChip(
     }
 }
 
-// ─── ChatGPT Empty State (Welcome View) ────────────────────────────────────
+// ─── Premium first-conversation experience ────────────────────────────────
 
 @Composable
 private fun EmptyChatWelcomeView(
@@ -523,81 +536,99 @@ private fun EmptyChatWelcomeView(
         contentAlignment = Alignment.Center
     ) {
         Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier.widthIn(max = 600.dp).verticalScroll(rememberScrollState()),
+            horizontalAlignment = Alignment.Start
         ) {
-            // Futuristic Monochrome AI Robot Emblem
             Surface(
-                shape = CircleShape,
-                color = MaterialTheme.colorScheme.surfaceVariant,
-                border = BorderStroke(1.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
-                modifier = Modifier.size(64.dp)
+                shape = RoundedCornerShape(24.dp),
+                color = MaterialTheme.colorScheme.primaryContainer,
+                modifier = Modifier.size(66.dp)
             ) {
                 Box(contentAlignment = Alignment.Center) {
-                    Image(
-                        painter = painterResource(id = R.drawable.app_logo),
-                        contentDescription = "AI Robot Emblem",
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .clip(CircleShape)
+                    Icon(
+                        Icons.Default.AutoAwesome,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                        modifier = Modifier.size(30.dp)
                     )
                 }
             }
-
-            Spacer(Modifier.height(20.dp))
-
+            Spacer(Modifier.height(24.dp))
             Text(
-                text = "What's on your mind?",
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.Bold,
+                "Your ideas,\ncompletely yours.",
+                style = MaterialTheme.typography.headlineMedium,
                 color = MaterialTheme.colorScheme.onBackground
             )
-
-            Spacer(Modifier.height(6.dp))
-
+            Spacer(Modifier.height(12.dp))
             Text(
-                text = "$modelName • 100% On-Device & Private",
-                style = MaterialTheme.typography.bodyMedium,
+                "A thoughtful AI assistant that runs right here on your device. What would you like to explore?",
+                style = MaterialTheme.typography.bodyLarge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-
-            Spacer(Modifier.height(36.dp))
-
-            // Clean prompt cards
-            val promptSuggestions = if (isVisionModel) {
-                listOf(
-                    "Describe an uploaded photo in detail",
-                    "Explain quantum computing simply",
-                    "Write a Python script for matrix multiplication"
-                )
-            } else {
-                listOf(
-                    "Explain the difference between CPU and NPU inference",
-                    "Summarize the key principles of thermodynamics",
-                    "Write 3 productive habits for software developers"
-                )
-            }
-
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+            Spacer(Modifier.height(18.dp))
+            Surface(
+                shape = RoundedCornerShape(50),
+                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f)
             ) {
-                for (prompt in promptSuggestions) {
-                    Surface(
-                        shape = RoundedCornerShape(14.dp),
-                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)),
+                Row(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Default.Lock, contentDescription = null, modifier = Modifier.size(15.dp), tint = MaterialTheme.colorScheme.onPrimaryContainer)
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        "Local inference · " + modelName.take(26),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+            Spacer(Modifier.height(30.dp))
+            Text(
+                "A GOOD PLACE TO START",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                letterSpacing = 1.sp
+            )
+            Spacer(Modifier.height(12.dp))
+            val prompts = listOf(
+                Icons.Default.Lightbulb to "Help me brainstorm something creative",
+                Icons.Default.Code to "Write a simple Kotlin example",
+                Icons.Default.School to "Explain a difficult topic simply"
+            )
+            prompts.forEach { (icon, prompt) ->
+                Surface(
+                    shape = RoundedCornerShape(18.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 9.dp)
+                ) {
+                    Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clip(RoundedCornerShape(14.dp))
                             .clickable { onSelectPrompt(prompt) }
+                            .padding(horizontal = 16.dp, vertical = 15.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant,
+                            modifier = Modifier.size(38.dp)
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(icon, contentDescription = null, modifier = Modifier.size(19.dp), tint = MaterialTheme.colorScheme.primary)
+                            }
+                        }
+                        Spacer(Modifier.width(12.dp))
                         Text(
-                            text = prompt,
+                            prompt,
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurface,
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 13.dp)
+                            modifier = Modifier.weight(1f)
                         )
+                        Icon(Icons.Default.ArrowForward, contentDescription = null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
             }
@@ -665,10 +696,12 @@ private fun MessageListView(
         LazyColumn(
             state = listState,
             modifier = Modifier
+                .align(Alignment.Center)
+                .widthIn(max = 840.dp)
                 .fillMaxSize()
-                .padding(horizontal = 16.dp),
-            contentPadding = PaddingValues(top = 10.dp, bottom = 24.dp),
-            verticalArrangement = Arrangement.spacedBy(18.dp)
+                .padding(horizontal = 20.dp),
+            contentPadding = PaddingValues(top = 18.dp, bottom = 32.dp),
+            verticalArrangement = Arrangement.spacedBy(24.dp)
         ) {
             // Memory context badge at top of conversation if persistent memories were retrieved
             if (lastUsedMemories.isNotEmpty()) {
@@ -1022,6 +1055,7 @@ private fun EngineStatusOverlay(
             horizontalAlignment = Alignment.CenterHorizontally,
             modifier = Modifier
                 .padding(24.dp)
+                .widthIn(max = 500.dp)
                 .fillMaxWidth()
         ) {
             when (state) {

@@ -14,7 +14,11 @@ app/build/
 *.ap_
 *.aab
 
-# Private Android signing keys should never be committed.
+# Private Android signing keys and sensitive material should never be committed.
 *.keystore
 *.jks
 *.p12
+*.pk8
+*.pem
+keystore.properties
+*.bak

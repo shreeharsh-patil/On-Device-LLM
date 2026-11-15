@@ -1,12 +1,21 @@
-# Add project specific R8 rules here.
-# AGP will combine all keep rule files in src/main/keepRules to pass to R8
-#
-# For more details, see
-#   https://d.android.com/r/tools/r8/keep-rules
+# R8 / ProGuard keep rules for Uncensored AI (on_device_qwen)
 
-# If your project uses WebView with JS, uncomment the following
-# and specify the fully qualified class name to the JavaScript interface
-# class:
-#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
-#   public *;
-#}
+# Keep JNI entry points and token-streaming callback registered by JNI_OnLoad in libdolphin_gguf.so
+-keep class com.example.on_device_qwen.inference.DolphinNativeEngine {
+    <init>(...);
+    native <methods>;
+}
+-keep interface com.example.on_device_qwen.inference.ChunkListener {
+    public boolean onBytes(byte[]);
+}
+-keep class * implements com.example.on_device_qwen.inference.ChunkListener {
+    public boolean onBytes(byte[]);
+}
+
+# LiteRT-LM AAR does not ship consumer proguard rules; preserve JNI bridge, callbacks, and benchmark/reflection types
+-keep class com.google.ai.edge.litertlm.** { *; }
+-dontwarn com.google.ai.edge.litertlm.**
+
+# Preserve model classes and data helpers
+-keep class com.example.on_device_qwen.model.** { *; }
+-keepclassmembers class com.example.on_device_qwen.data.** { *; }

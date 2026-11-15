@@ -1,1 +1,8 @@
 /build
+*.keystore
+*.jks
+*.p12
+*.pk8
+*.pem
+keystore.properties
+*.bak

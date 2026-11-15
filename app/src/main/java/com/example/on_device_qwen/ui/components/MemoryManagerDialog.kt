@@ -391,7 +391,7 @@ private fun MemoryCardItem(
                         color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
                     )
                     Spacer(Modifier.width(6.dp))
-                    IconButton(onClick = onEdit, modifier = Modifier.size(28.dp)) {
+                    IconButton(onClick = onEdit, modifier = Modifier.size(44.dp)) {
                         Icon(
                             imageVector = Icons.Outlined.Edit,
                             contentDescription = "Edit memory",
@@ -399,7 +399,7 @@ private fun MemoryCardItem(
                             tint = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
-                    IconButton(onClick = onDelete, modifier = Modifier.size(28.dp)) {
+                    IconButton(onClick = onDelete, modifier = Modifier.size(44.dp)) {
                         Icon(
                             imageVector = Icons.Outlined.Delete,
                             contentDescription = "Delete memory",

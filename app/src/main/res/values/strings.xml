@@ -1,3 +1,35 @@
 <resources>
     <string name="app_name">On-Device-Qwen</string>
+    <string name="app_display_name">On-Device LLM</string>
+    <string name="app_tagline">100% On-Device &amp; Private</string>
+
+    <!-- Navigation & Common Actions -->
+    <string name="cd_open_drawer">Open conversations drawer</string>
+    <string name="cd_new_chat">Start new chat</string>
+    <string name="cd_close">Close</string>
+    <string name="cd_back">Navigate back</string>
+    <string name="cd_dismiss_banner">Dismiss notice</string>
+    <string name="cd_more_options">More options</string>
+    <string name="cd_clear_search">Clear search</string>
+
+    <!-- Chat Composer & Messages -->
+    <string name="cd_attach_image">Attach image</string>
+    <string name="cd_remove_image">Remove attached image</string>
+    <string name="cd_send_message">Send message</string>
+    <string name="cd_stop_generation">Stop generating</string>
+    <string name="cd_scroll_to_bottom">Scroll to latest message</string>
+    <string name="cd_copy_message">Copy message</string>
+    <string name="cd_read_aloud">Read aloud</string>
+    <string name="cd_stop_speaking">Stop reading aloud</string>
+    <string name="cd_regenerate">Regenerate response</string>
+    <string name="cd_share_message">Share message</string>
+    <string name="cd_edit_message">Edit message</string>
+
+    <!-- Sections & Modes -->
+    <string name="label_standard_mode">Standard</string>
+    <string name="label_unrestricted_mode">Unrestricted</string>
+    <string name="label_models">Models</string>
+    <string name="label_memory">Memory</string>
+    <string name="label_settings">Settings</string>
+    <string name="label_active">Active</string>
 </resources>

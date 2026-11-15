@@ -101,4 +101,30 @@ class GenerationDeduplicationAndStreamTests {
         assertTrue("Default stop sequences must contain chatml end token", config.stopSequences.contains("<|im_end|>"))
         assertTrue("Default stop sequences must contain endoftext token", config.stopSequences.contains("<|endoftext|>"))
     }
+
+    @Test
+    fun testStreamFilterReassemblesSplitUtf8AndSuppressesSplitStopSequences() {
+        val filter = LlamaCppInferenceEngine.Utf8AndStopStreamFilter(listOf("<|im_end|>", "STOP_NOW"))
+        val out = StringBuilder()
+
+        // 4-byte emoji U+1F600 split 2+2 bytes across separate native token emissions,
+        // followed by a stop sequence split across 3 chunks.
+        val emojiBytes = "Hi \uD83D\uDE00 ok".toByteArray(Charsets.UTF_8)
+        val splitIndex = 5 // Inside 4-byte UTF-8 sequence (F0 9F | 98 80)
+        out.append(filter.appendBytes(emojiBytes.copyOfRange(0, splitIndex)).emittedText)
+        assertFalse("Partial UTF-8 bytes must not decode as replacement character", out.toString().contains('\uFFFD'))
+        out.append(filter.appendBytes(emojiBytes.copyOfRange(splitIndex, emojiBytes.size)).emittedText)
+
+        out.append(filter.appendBytes("<|im_".toByteArray(Charsets.UTF_8)).emittedText)
+        assertFalse("Partial stop prefix must be held back", out.toString().contains("<|im_"))
+
+        val stopChunk = filter.appendBytes("end|>IGNORED_TAIL".toByteArray(Charsets.UTF_8))
+        out.append(stopChunk.emittedText)
+        assertTrue("Full stop match must terminate stream", stopChunk.hitStop)
+        out.append(filter.flush(stoppedByStopSequence = true))
+
+        assertEquals("Hi \uD83D\uDE00 ok", out.toString())
+        assertFalse(out.toString().contains("IGNORED_TAIL"))
+        assertFalse(out.toString().contains('\uFFFD'))
+    }
 }

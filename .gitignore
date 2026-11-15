@@ -11,6 +11,7 @@ app/build/
 .externalNativeBuild
 .cxx
 *.apk
+!release-artifacts/*v1.4.0*.apk
 *.ap_
 *.aab
 

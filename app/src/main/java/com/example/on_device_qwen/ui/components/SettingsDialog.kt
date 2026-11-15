@@ -23,7 +23,6 @@ import com.example.on_device_qwen.domain.performance.DeviceThermalState
 import com.example.on_device_qwen.model.BackendType
 import com.example.on_device_qwen.model.PromptProfile
 import com.example.on_device_qwen.model.UnrestrictedMode
-import com.example.on_device_qwen.ui.theme.QwenPrimary
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -69,9 +68,10 @@ fun SettingsDialog(
     ) {
         Surface(
             modifier = Modifier
+                .widthIn(max = 700.dp)
                 .fillMaxWidth(0.94f)
-                .fillMaxHeight(0.90f),
-            shape = RoundedCornerShape(20.dp),
+                .fillMaxHeight(0.92f),
+            shape = RoundedCornerShape(26.dp),
             color = MaterialTheme.colorScheme.surface,
             tonalElevation = 6.dp
         ) {
@@ -84,11 +84,18 @@ fun SettingsDialog(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Text(
-                        text = "Settings",
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.Bold
-                    )
+                    Column {
+                        Text(
+                            text = "Settings",
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            "Make your local AI your own",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                     IconButton(onClick = onDismiss) {
                         Icon(Icons.Default.Close, contentDescription = "Close")
                     }
@@ -102,7 +109,7 @@ fun SettingsDialog(
                         .weight(1f)
                         .verticalScroll(rememberScrollState())
                         .padding(20.dp),
-                    verticalArrangement = Arrangement.spacedBy(20.dp)
+                    verticalArrangement = Arrangement.spacedBy(28.dp)
                 ) {
                     // 1. Performance Profile
                     SettingsSection(title = "Performance Profile") {
@@ -469,7 +476,7 @@ fun SettingsDialog(
                                     Text(
                                         thermalState.label,
                                         fontWeight = FontWeight.Bold,
-                                        color = if (thermalState.isWarning) MaterialTheme.colorScheme.error else QwenPrimary
+                                        color = if (thermalState.isWarning) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
                                     )
                                 }
                                 Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
@@ -499,8 +506,8 @@ fun SettingsSection(title: String, content: @Composable ColumnScope.() -> Unit) 
         Text(
             text = title,
             style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.Bold,
-            color = MaterialTheme.colorScheme.primary
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSurface
         )
         content()
     }

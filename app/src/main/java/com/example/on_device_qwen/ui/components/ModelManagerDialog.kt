@@ -77,9 +77,9 @@ fun ModelManagerDialog(
     ) {
         Surface(
             modifier = Modifier
+                .widthIn(max = 740.dp)
                 .fillMaxWidth(0.96f)
-                .fillMaxHeight(0.94f)
-                .widthIn(max = 740.dp),
+                .fillMaxHeight(0.94f),
             shape = RoundedCornerShape(26.dp),
             color = MaterialTheme.colorScheme.surface,
             tonalElevation = 6.dp
@@ -196,6 +196,8 @@ fun ModelManagerDialog(
                             items(models, key = { it.file.absolutePath }) { model ->
                                 val isSelected = activeModel?.file?.absolutePath == model.file.absolutePath
                                 val isRamInsufficient = model.estimatedRamMb > availRamMb
+                                val appOwned = model.file.parentFile?.absolutePath == context.filesDir.absolutePath ||
+                                    model.file.parentFile?.absolutePath == context.getExternalFilesDir(null)?.absolutePath
 
                                 Surface(
                                     shape = RoundedCornerShape(12.dp),
@@ -235,7 +237,7 @@ fun ModelManagerDialog(
                                                     )
                                                 }
                                             }
-                                            if (!isSelected) {
+                                            if (!isSelected && appOwned) {
                                                 IconButton(onClick = { modelPendingDeletion = model }) {
                                                     Icon(Icons.Default.DeleteOutline, contentDescription = "Remove model " + model.name, tint = MaterialTheme.colorScheme.onSurfaceVariant)
                                                 }

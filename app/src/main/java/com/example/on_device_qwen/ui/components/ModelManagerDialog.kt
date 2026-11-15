@@ -42,6 +42,7 @@ fun ModelManagerDialog(
     onDismiss: () -> Unit
 ) {
     var selectedTab by remember { mutableIntStateOf(0) }
+    var modelPendingDeletion by remember { mutableStateOf<ModelMetadata?>(null) }
     val context = LocalContext.current
 
     val filePickerLauncher = rememberLauncherForActivityResult(
@@ -52,15 +53,34 @@ fun ModelManagerDialog(
         }
     }
 
+    modelPendingDeletion?.let { candidate ->
+        AlertDialog(
+            onDismissRequest = { modelPendingDeletion = null },
+            title = { Text("Remove local model?") },
+            text = { Text("Remove " + candidate.name + " from the app? App-owned model files will be deleted. Files outside app storage will only be unregistered.") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onDeleteModel(candidate)
+                        modelPendingDeletion = null
+                    },
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
+                ) { Text("Remove model") }
+            },
+            dismissButton = { TextButton(onClick = { modelPendingDeletion = null }) { Text("Cancel") } }
+        )
+    }
+
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
         Surface(
             modifier = Modifier
-                .fillMaxWidth(0.95f)
-                .fillMaxHeight(0.92f),
-            shape = RoundedCornerShape(20.dp),
+                .fillMaxWidth(0.96f)
+                .fillMaxHeight(0.94f)
+                .widthIn(max = 740.dp),
+            shape = RoundedCornerShape(26.dp),
             color = MaterialTheme.colorScheme.surface,
             tonalElevation = 6.dp
         ) {
@@ -75,12 +95,12 @@ fun ModelManagerDialog(
                 ) {
                     Column {
                         Text(
-                            text = "Model Management",
+                            text = "Your model library",
                             style = MaterialTheme.typography.titleLarge,
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            text = "Dolphin 3.0, Qwen 2.5/3.5, & Abliterated Models",
+                            text = "Run capable AI models directly on your device",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -103,7 +123,7 @@ fun ModelManagerDialog(
                     Tab(
                         selected = selectedTab == 1,
                         onClick = { selectedTab = 1 },
-                        text = { Text("Model Catalog", fontWeight = FontWeight.SemiBold) }
+                        text = { Text("Discover models", fontWeight = FontWeight.SemiBold) }
                     )
                 }
 
@@ -138,7 +158,7 @@ fun ModelManagerDialog(
                     ) {
                         Button(
                             onClick = { filePickerLauncher.launch(arrayOf("*/*")) },
-                            colors = ButtonDefaults.buttonColors(containerColor = QwenPrimary),
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
                             shape = RoundedCornerShape(12.dp),
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -146,7 +166,7 @@ fun ModelManagerDialog(
                         ) {
                             Icon(Icons.Default.FileOpen, contentDescription = null)
                             Spacer(Modifier.width(8.dp))
-                            Text("Import Model from Storage (GGUF / LiteRT)")
+                            Text("Import GGUF or LiteRT model")
                         }
 
                         Spacer(Modifier.height(12.dp))
@@ -164,7 +184,7 @@ fun ModelManagerDialog(
                                         contentAlignment = Alignment.Center
                                     ) {
                                         Text(
-                                            text = "No models installed on device.\nTap 'Import Model' above or explore the Catalog tab to get models.",
+                                            text = "No models installed yet.\nImport a compatible model or explore the catalog to get started.",
                                             style = MaterialTheme.typography.bodyMedium,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                                             textAlign = androidx.compose.ui.text.style.TextAlign.Center
@@ -182,7 +202,7 @@ fun ModelManagerDialog(
                                     color = if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
                                     border = BorderStroke(
                                         1.dp,
-                                        if (isSelected) QwenPrimary else if (isRamInsufficient) MaterialTheme.colorScheme.error.copy(alpha = 0.5f) else Color.Transparent
+                                        if (isSelected) MaterialTheme.colorScheme.primary else if (isRamInsufficient) MaterialTheme.colorScheme.error.copy(alpha = 0.5f) else Color.Transparent
                                     ),
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -204,15 +224,20 @@ fun ModelManagerDialog(
                                             if (isSelected) {
                                                 Surface(
                                                     shape = RoundedCornerShape(6.dp),
-                                                    color = QwenPrimary
+                                                    color = MaterialTheme.colorScheme.primary
                                                 ) {
                                                     Text(
-                                                        "ACTIVE",
-                                                        color = Color.White,
+                                                        "IN USE",
+                                                        color = MaterialTheme.colorScheme.onPrimary,
                                                         fontSize = 10.sp,
                                                         fontWeight = FontWeight.Bold,
                                                         modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                                                     )
+                                                }
+                                            }
+                                            if (!isSelected) {
+                                                IconButton(onClick = { modelPendingDeletion = model }) {
+                                                    Icon(Icons.Default.DeleteOutline, contentDescription = "Remove model " + model.name, tint = MaterialTheme.colorScheme.onSurfaceVariant)
                                                 }
                                             }
                                         }
@@ -223,22 +248,16 @@ fun ModelManagerDialog(
                                             horizontalArrangement = Arrangement.spacedBy(6.dp),
                                             verticalAlignment = Alignment.CenterVertically
                                         ) {
-                                            SuggestionChip(
-                                                onClick = {},
-                                                label = { Text(model.engineType.displayName, fontSize = 11.sp) }
-                                            )
-                                            SuggestionChip(
-                                                onClick = {},
-                                                label = { Text(model.quantization, fontSize = 11.sp) }
-                                            )
+                                            ModelMetaTag(model.engineType.displayName)
+                                            ModelMetaTag(model.quantization)
                                             if (model.isAbliterated) {
                                                 Surface(
                                                     shape = RoundedCornerShape(6.dp),
-                                                    color = QwenSecondary.copy(alpha = 0.2f)
+                                                    color = MaterialTheme.colorScheme.primaryContainer
                                                 ) {
                                                     Text(
                                                         "Abliterated / Uncensored",
-                                                        color = QwenSecondary,
+                                                        color = MaterialTheme.colorScheme.onPrimaryContainer,
                                                         fontSize = 10.sp,
                                                         fontWeight = FontWeight.Bold,
                                                         modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
@@ -339,12 +358,12 @@ fun ModelManagerDialog(
                                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        SuggestionChip(onClick = {}, label = { Text(item.quantization, fontSize = 11.sp) })
-                                        SuggestionChip(onClick = {}, label = { Text(item.fileSizeFormatted, fontSize = 11.sp) })
-                                        SuggestionChip(onClick = {}, label = { Text("RAM: ${item.recommendedRamMb}MB", fontSize = 11.sp) })
+                                        ModelMetaTag(item.quantization)
+                                        ModelMetaTag(item.fileSizeFormatted)
+                                        ModelMetaTag("RAM: " + item.recommendedRamMb + "MB")
                                         if (item.isAbliterated) {
-                                            Surface(shape = RoundedCornerShape(6.dp), color = QwenSecondary.copy(alpha = 0.2f)) {
-                                                Text("Abliterated", color = QwenSecondary, fontSize = 10.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp))
+                                            Surface(shape = RoundedCornerShape(6.dp), color = MaterialTheme.colorScheme.primaryContainer) {
+                                                Text("Abliterated", color = MaterialTheme.colorScheme.onPrimaryContainer, fontSize = 10.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp))
                                             }
                                         }
                                     }
@@ -388,5 +407,18 @@ fun ModelManagerDialog(
                 }
             }
         }
+    }
+}
+
+
+@Composable
+private fun ModelMetaTag(label: String) {
+    Surface(shape = RoundedCornerShape(10.dp), color = MaterialTheme.colorScheme.surfaceVariant) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 9.dp, vertical = 6.dp)
+        )
     }
 }

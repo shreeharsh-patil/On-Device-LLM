@@ -81,7 +81,7 @@ fun ChatNavigationDrawerContent(
 
     ModalDrawerSheet(
         drawerContainerColor = MaterialTheme.colorScheme.surface,
-        modifier = modifier.widthIn(max = 320.dp)
+        modifier = modifier.widthIn(max = 344.dp)
     ) {
         Column(
             modifier = Modifier
@@ -112,12 +112,12 @@ fun ChatNavigationDrawerContent(
                 Spacer(Modifier.width(12.dp))
                 Column {
                     Text(
-                        text = "On-Device LLM",
+                        text = "On-Device AI",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = "100% Offline AI",
+                        text = "Private by design · Local by default",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -128,11 +128,11 @@ fun ChatNavigationDrawerContent(
 
             // New Chat Button
             Surface(
-                color = MaterialTheme.colorScheme.surfaceVariant,
-                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.primaryContainer,
+                shape = RoundedCornerShape(16.dp),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(12.dp))
+                    .clip(RoundedCornerShape(16.dp))
                     .clickable { onNewChat() }
             ) {
                 Row(
@@ -141,13 +141,14 @@ fun ChatNavigationDrawerContent(
                 ) {
                     Icon(
                         imageVector = Icons.Default.Add,
-                        contentDescription = "New chat",
-                        tint = QwenPrimary
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onPrimaryContainer
                     )
                     Spacer(Modifier.width(12.dp))
                     Text(
-                        text = "New chat",
-                        style = MaterialTheme.typography.bodyLarge,
+                        text = "Start a new conversation",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer,
                         fontWeight = FontWeight.SemiBold
                     )
                 }
@@ -172,7 +173,7 @@ fun ChatNavigationDrawerContent(
                 },
                 shape = RoundedCornerShape(12.dp),
                 colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = QwenPrimary,
+                    focusedBorderColor = MaterialTheme.colorScheme.primary,
                     unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f),
                     focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
                     unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.15f),
@@ -190,6 +191,20 @@ fun ChatNavigationDrawerContent(
                 modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
+                if (groupedSessions.isEmpty()) {
+                    item(key = "empty_history") {
+                        Column(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 36.dp, horizontal = 12.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Icon(Icons.Default.ChatBubbleOutline, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(28.dp))
+                            Spacer(Modifier.height(12.dp))
+                            Text("No conversations yet", style = MaterialTheme.typography.titleSmall)
+                            Spacer(Modifier.height(4.dp))
+                            Text("Your local chats will appear here.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                }
                 groupedSessions.forEach { (header, list) ->
                     item(key = "header_$header") {
                         Text(
@@ -206,11 +221,11 @@ fun ChatNavigationDrawerContent(
                         var menuExpanded by remember { mutableStateOf(false) }
 
                         Surface(
-                            color = if (isSelected) MaterialTheme.colorScheme.surfaceVariant else Color.Transparent,
-                            shape = RoundedCornerShape(10.dp),
+                            color = if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f) else Color.Transparent,
+                            shape = RoundedCornerShape(14.dp),
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clip(RoundedCornerShape(10.dp))
+                                .clip(RoundedCornerShape(14.dp))
                                 .clickable { onSelectConversation(session) }
                         ) {
                             Row(
@@ -221,7 +236,7 @@ fun ChatNavigationDrawerContent(
                                     Icon(
                                         imageVector = Icons.Default.PushPin,
                                         contentDescription = "Pinned",
-                                        tint = QwenSecondary,
+                                        tint = MaterialTheme.colorScheme.primary,
                                         modifier = Modifier.size(14.dp)
                                     )
                                     Spacer(Modifier.width(6.dp))
@@ -231,7 +246,7 @@ fun ChatNavigationDrawerContent(
                                     text = session.title,
                                     style = MaterialTheme.typography.bodyMedium,
                                     fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
-                                    color = if (isSelected) QwenPrimary else MaterialTheme.colorScheme.onSurface,
+                                    color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
                                     modifier = Modifier.weight(1f)
@@ -302,30 +317,30 @@ fun ChatNavigationDrawerContent(
                 TextButton(onClick = onOpenModelManager) {
                     Icon(Icons.Default.Layers, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(Modifier.width(4.dp))
-                    Text("Models", fontSize = 12.sp)
+                    Text("Models", style = MaterialTheme.typography.labelMedium)
                 }
 
                 TextButton(onClick = onOpenMemory) {
                     Icon(Icons.Default.Psychology, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(Modifier.width(4.dp))
-                    Text("Memory", fontSize = 12.sp)
+                    Text("Memory", style = MaterialTheme.typography.labelMedium)
                 }
 
                 TextButton(onClick = onOpenSettings) {
                     Icon(Icons.Default.Settings, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(Modifier.width(4.dp))
-                    Text("Settings", fontSize = 12.sp)
+                    Text("Settings", style = MaterialTheme.typography.labelMedium)
                 }
             }
 
             // Real-time device badge
             Surface(
                 color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                shape = RoundedCornerShape(8.dp),
+                shape = RoundedCornerShape(14.dp),
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Row(
-                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {

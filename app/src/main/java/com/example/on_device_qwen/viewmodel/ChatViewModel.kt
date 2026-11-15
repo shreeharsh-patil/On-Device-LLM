@@ -838,6 +838,27 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * Only the app's own imported models are deletable in the UI. Never remove a
+     * model backing a running native inference session.
+     */
+    fun deleteModel(model: ModelMetadata) {
+        if (activeEngine?.activeModel?.file?.absolutePath == model.file.absolutePath) {
+            _validationBanner.value = "Switch to another model before removing the active model."
+            return
+        }
+        viewModelScope.launch {
+            val removed = modelRepository.deleteModel(model.file)
+            if (!removed) {
+                _validationBanner.value = "Could not remove the model. Check available storage and try again."
+                return@launch
+            }
+            val updated = modelRepository.scanModels()
+            _discoveredModels.value = updated
+            _availableModels.value = updated.map { it.file }
+        }
+    }
+
     // ── Settings Updates ──────────────────────────────────────────────────────
     fun setPerformanceMode(mode: PerformanceMode) {
         _performanceMode.value = mode

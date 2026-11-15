@@ -47,7 +47,7 @@ fun ThinkingSection(
         shape = RoundedCornerShape(12.dp),
         border = BorderStroke(
             1.dp,
-            if (isThinking) QwenSecondary.copy(alpha = 0.6f) else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
+            if (isThinking) MaterialTheme.colorScheme.primary.copy(alpha = 0.4f) else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
         ),
         modifier = modifier.fillMaxWidth()
     ) {
@@ -68,15 +68,15 @@ fun ThinkingSection(
                         imageVector = Icons.Default.AutoAwesome,
                         contentDescription = null,
                         modifier = Modifier.size(16.dp),
-                        tint = QwenSecondary
+                        tint = MaterialTheme.colorScheme.primary
                     )
                 }
                 Spacer(Modifier.width(8.dp))
                 Text(
-                    text = if (isThinking) "Thinking deeply…" else "Thought process",
+                    text = if (isThinking) "Reasoning…" else "Model reasoning",
                     style = MaterialTheme.typography.labelMedium,
                     fontWeight = FontWeight.SemiBold,
-                    color = if (isThinking) QwenSecondary else MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = if (isThinking) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.weight(1f)
                 )
                 Icon(
@@ -98,7 +98,7 @@ fun ThinkingSection(
                                 .height(IntrinsicSize.Min)
                                 .background(
                                     Brush.verticalGradient(
-                                        listOf(QwenSecondary.copy(alpha = 0.8f), QwenPrimary.copy(alpha = 0.2f))
+                                        listOf(MaterialTheme.colorScheme.primary.copy(alpha = 0.6f), MaterialTheme.colorScheme.primary.copy(alpha = 0.12f))
                                     ),
                                     RoundedCornerShape(2.dp)
                                 )
@@ -143,6 +143,6 @@ private fun PulsingThinkingDot() {
         modifier = Modifier
             .size(10.dp)
             .clip(CircleShape)
-            .background(QwenSecondary.copy(alpha = alpha))
+            .background(MaterialTheme.colorScheme.primary.copy(alpha = alpha))
     )
 }
